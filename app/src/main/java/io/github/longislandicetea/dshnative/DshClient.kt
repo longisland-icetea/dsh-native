@@ -108,7 +108,12 @@ class DshClient(
 
     fun start() {
         if (muxJob != null) return
-        muxJob = scope.launch {
+        // Dispatchers.IO, not the caller's scope: the caller passes a
+        // lifecycleScope, so launching here put the WebSocket connect and its
+        // reader loop on the main thread, where Android forbids socket I/O, and
+        // a dropped connection killed the process with a SocketException.
+        muxJob = scope.launch(Dispatchers.IO) {
+            record("mux loop on ${Thread.currentThread().name}")
             var attempt = 0
             while (true) {
                 val startedAt = System.currentTimeMillis()
@@ -518,7 +523,7 @@ class DshClient(
             return@callbackFlow
         }
 
-        val pump = scope.launch {
+        val pump = scope.launch(Dispatchers.IO) {
             for (frame in channel) {
                 trySend(frame)
                 if (frame is MuxFrame.End || frame is MuxFrame.Failure) break
@@ -541,6 +546,11 @@ class DshClient(
         append(",\"payload\":{\"args\":")
         append(args.toString())
         append("}}")
+    }
+
+    /** Mirror one transport line into logcat, so the thread is visible. */
+    private fun record(line: String) {
+        android.util.Log.i("DshNative", line)
     }
 
     private fun log(line: String) {

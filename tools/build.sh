@@ -32,6 +32,10 @@ ANDROID_JAR="$PLATFORM/android.jar"
 # ...-embeddable artifacts fail with NoClassDefFoundError on
 # org.jetbrains.kotlin.com.intellij.util.keyFMap.KeyFMap.
 KOTLIN_LIB="$HOME/.local/kotlinc/lib"
+# A monotonically increasing versionCode, so two builds are distinguishable on
+# a device. Seconds since the epoch fit Android's 32-bit limit (valid until
+# 2038); a yymmddhhmm stamp does not, which aapt2 rejects as an invalid value.
+BUILD_CODE="$(date -u +%s)"
 COMPOSE_PLUGIN="$KOTLIN_LIB/compose-compiler-plugin.jar"
 SERIALIZATION_PLUGIN="$KOTLIN_LIB/kotlinx-serialization-compiler-plugin.jar"
 OUT="$ROOT/build/manual"
@@ -85,7 +89,7 @@ SYMBOLS="$OUT/R.txt"
   --output-text-symbols "$SYMBOLS" \
   --min-sdk-version 29 \
   --target-sdk-version 36 \
-  --version-code 1 --version-name 0.1.0 \
+  --version-code "$BUILD_CODE" --version-name "0.1.0+$BUILD_CODE" \
   "$OUT/res.zip"
 
 # ── 2. R.java ────────────────────────────────────────────────────────────────

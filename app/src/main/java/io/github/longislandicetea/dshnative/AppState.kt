@@ -141,8 +141,15 @@ sealed interface TranscriptItem {
         val arguments: kotlinx.serialization.json.JsonObject?,
         val rawArguments: String?,
         val result: String?,
-        val failed: Boolean,
+        /**
+         * Whether the call has been answered. A null result means "no output",
+         * which is different from "no result yet": keying status off a nullable
+         * result left completed calls showing as running forever.
+         */
+        val status: Status,
     ) : TranscriptItem {
+        enum class Status { RUNNING, DONE, FAILED }
+
         fun callIdOrNull(): String? = callId
     }
 
@@ -215,7 +222,7 @@ data class SessionGroup(
             fun visible(session: SessionSummary?): Boolean =
                 session != null &&
                     session.origin != "subagent" &&
-                    (!archived.contains(session.sessionId) || showArchived) &&
+                    (showArchived || !archived.contains(session.sessionId)) &&
                     (!session.blank || session.sessionId == currentId)
 
             val groups = mutableListOf<SessionGroup>()
@@ -274,6 +281,20 @@ data class AppState(
     /** Provider/model/effort currently in force for the open conversation. */
     val selection: ModelSelection? = null,
 ) {
+    /**
+     * Sessions the drawer actually shows.
+     *
+     * Subagent sessions are children of a parent row and never appear on their
+     * own, so counting them made the total disagree with the list — 56 counted
+     * against 33 shown. The grouping below applies the same predicate.
+     */
+    val visibleSessions: List<SessionSummary>
+        get() = sessions.filter { session ->
+            session.origin != "subagent" &&
+                (showArchived || !archived.contains(session.sessionId)) &&
+                (!session.blank || session.sessionId == conversation?.sessionId)
+        }
+
     /** Sessions grouped and ordered for the drawer. */
     val groups: List<SessionGroup>
         get() = SessionGroup.fromWorkspaces(
@@ -312,7 +333,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private val _state = MutableStateFlow(
         AppState(
             collapsed = viewStore?.collapsed() ?: emptySet(),
-            showArchived = viewStore?.showArchived() ?: false,
+            // Archived sessions are hidden unless asked for; the switch lives in
+            // settings and this is its default, not its remembered value.
+            showArchived = false,
         ),
     )
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -760,11 +783,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             "assistant/message" -> text?.let { TranscriptItem.Assistant(key, it, streaming = false) }
                 ?: TranscriptItem.Activity(key, event.label, event.detail)
             "turn/end" -> TranscriptItem.Note(key, "turn finished")
-            // Rendering every step boundary, inbox splice and tool result buries
-            // the conversation: one sampled turn produced 315 such rows against
-            // 41 assistant messages. A tool result is folded into its call.
-            "step/start", "step/end", "agent/inbox/spliced",
-            "tool/result", "request/header", "request/context",
+            // Rendering every step boundary and inbox splice buries the
+            // conversation: one sampled turn produced hundreds of such rows
+            // against 41 assistant messages.
+            "turn/start", "step/start", "step/end", "agent/inbox/spliced",
+            "request/header", "request/context",
             -> null
             "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
                 TranscriptItem.ToolCall(
@@ -774,11 +797,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     arguments = call.arguments,
                     rawArguments = call.rawArguments,
                     result = null,
-                    failed = false,
+                    status = TranscriptItem.ToolCall.Status.RUNNING,
                 )
             } ?: TranscriptItem.Activity(key, event.label, event.detail)
-            // A result is folded into its call by pairToolResults once the whole
-            // window is known; standalone here so nothing is ever dropped.
+            // tool/result must produce a row even though it is never rendered:
+            // pairToolResults needs the row to fold into its call, and hiding it
+            // here left every tool stuck at "running".
             "tool/result" -> {
                 val result = EventPayload.toolResultOf(event)
                 TranscriptItem.ToolResultRow(key, result?.toolCallId, result?.text, result?.isError ?: false)
@@ -808,10 +832,21 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             when {
                 item is TranscriptItem.ToolCall -> {
                     val row = byCallId[item.callIdOrNull()]?.takeIf { it.key !in consumed }
-                    if (row != null) consumed += row.key
-                    item.copy(result = row?.text ?: item.result, failed = row?.failed ?: item.failed)
+                    if (row == null) {
+                        item
+                    } else {
+                        consumed += row.key
+                        item.copy(
+                            result = row.text,
+                            status = if (row.failed) TranscriptItem.ToolCall.Status.FAILED
+                            else TranscriptItem.ToolCall.Status.DONE,
+                        )
+                    }
                 }
-                item is TranscriptItem.ToolResultRow && item.key in consumed -> null
+                // Every result row is dropped: a paired one has been folded into
+                // its call, and an unpaired one (paging landed mid-pair) would
+                // otherwise surface as a bare result line.
+                item is TranscriptItem.ToolResultRow -> null
                 else -> item
             }
         }

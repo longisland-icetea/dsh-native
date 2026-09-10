@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -144,10 +145,8 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                         scope.launch { drawerState.close() }
                     },
                     onRefresh = holder::refreshSessions,
-                    onSettings = { showSettings = true },
                     onToggleGroup = holder::toggleGroup,
                     onArchive = holder::archive,
-                    onShowArchived = holder::setShowArchived,
                 )
             }
         },
@@ -234,7 +233,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                 if (conversation == null) {
                     EmptyState(
                         connected = state.connected,
-                        sessionCount = state.sessions.size,
+                        sessionCount = state.visibleSessions.size,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                     )
                 } else {
@@ -247,6 +246,9 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     if (showSettings) {
         ConnectionDialog(
             initial = state.endpoint?.let { "${it.host}:${it.port}" } ?: saved.orEmpty(),
+            archivedCount = state.archived.size,
+            showArchived = state.showArchived,
+            onShowArchived = holder::setShowArchived,
             onDismiss = { showSettings = false },
             onConnect = { text ->
                 DshEndpoint.parse(text)?.let { endpoint ->
@@ -287,10 +289,8 @@ private fun SessionDrawer(
     state: AppState,
     onPick: (SessionSummary) -> Unit,
     onRefresh: () -> Unit,
-    onSettings: () -> Unit,
     onToggleGroup: (String) -> Unit,
     onArchive: (String) -> Unit,
-    onShowArchived: (Boolean) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(PANEL)) {
         Row(
@@ -300,19 +300,21 @@ private fun SessionDrawer(
             Column(Modifier.weight(1f)) {
                 Text("Sessions", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Text(
+                    // Counts live sessions: archived ones are hidden by default,
+                    // so a total that included them would not match the list.
                     text = when {
                         !state.connected -> "offline"
                         state.sessionsError != null -> "list failed"
-                        else -> "${state.sessions.size} sessions · ${state.sessionsBytes}B"
+                        // Counts what the list shows: subagent sessions are
+                        // children of a parent row, and archived ones are hidden
+                        // by default.
+                        else -> "${state.visibleSessions.size} sessions"
                     },
                     color = if (state.sessionsError != null || !state.connected) WARN else MUTED,
                     fontSize = 11.sp,
                 )
             }
             TextButton(onClick = onRefresh) { Text("Refresh") }
-            IconButton(onClick = onSettings) {
-                Icon(Icons.Filled.Settings, contentDescription = "Connection")
-            }
         }
         state.sessionsError?.let { message ->
             Text(
@@ -332,21 +334,6 @@ private fun SessionDrawer(
                         color = MUTED, fontSize = 12.sp,
                         modifier = Modifier.padding(16.dp),
                     )
-                }
-            }
-            if (state.archived.isNotEmpty()) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { onShowArchived(!state.showArchived) }
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = if (state.showArchived) "Hide archived (${state.archived.size})"
-                            else "Show archived (${state.archived.size})",
-                            color = ACCENT, fontSize = 12.sp,
-                        )
-                    }
                 }
             }
             state.groups.forEach { group ->
@@ -409,13 +396,16 @@ private fun SessionDrawer(
 @Composable
 private fun ConnectionDialog(
     initial: String,
+    archivedCount: Int,
+    showArchived: Boolean,
+    onShowArchived: (Boolean) -> Unit,
     onDismiss: () -> Unit,
     onConnect: (String) -> Unit,
 ) {
     var text by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Harness address") },
+        title = { Text("Settings") },
         text = {
             Column {
                 Text(
@@ -431,6 +421,19 @@ private fun ConnectionDialog(
                     singleLine = true,
                     label = { Text("host:port") },
                 )
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier.fillMaxWidth().clickable { onShowArchived(!showArchived) },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = showArchived, onCheckedChange = { onShowArchived(it) })
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "Show archived sessions ($archivedCount)",
+                        fontSize = 12.sp,
+                        color = if (archivedCount == 0) MUTED else Color(0xFFDDE2EC),
+                    )
+                }
             }
         },
         confirmButton = { TextButton(onClick = { onConnect(text) }) { Text("Connect") } },
@@ -704,8 +707,10 @@ private fun TranscriptRow(item: TranscriptItem) {
         is TranscriptItem.User -> UserBubble(item.text)
         is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming)
         is TranscriptItem.ToolCall -> ToolCard(item)
-        is TranscriptItem.ToolResultRow -> ActivityRow("← result", item.text?.take(200))
         is TranscriptItem.Activity -> ActivityRow(item.label, item.detail)
+        // Unfolded results are folded away by the reducer; this keeps the `when`
+        // exhaustive without ever rendering a bare result line.
+        is TranscriptItem.ToolResultRow -> Unit
         is TranscriptItem.Note -> Text(item.text, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp))
     }
 }
@@ -793,33 +798,45 @@ private fun CodeBlock(language: String?, code: String) {
  */
 @Composable
 private fun ToolCard(call: TranscriptItem.ToolCall) {
-    val accent = if (call.failed) WARN else ACCENT
+    var expanded by remember { mutableStateOf(false) }
+    val accent = when (call.status) {
+        TranscriptItem.ToolCall.Status.FAILED -> WARN
+        else -> ACCENT
+    }
     val args = call.arguments
 
     fun argText(key: String): String? = (args?.get(key) as? JsonPrimitive)?.contentOrNull
-    // The argument that identifies the call at a glance.
     val preview: String? = when (call.name) {
         "bash", "pwsh" -> argText("command") ?: argText("description")
         "read", "write", "edit" -> argText("file_path") ?: argText("path")
         else -> argText("command") ?: argText("path") ?: call.rawArguments
     }
-    val status = when {
-        call.result == null -> "running"
-        call.failed -> "failed"
-        else -> "done"
+    val statusLabel = when (call.status) {
+        TranscriptItem.ToolCall.Status.RUNNING -> "running"
+        TranscriptItem.ToolCall.Status.DONE -> "done"
+        TranscriptItem.ToolCall.Status.FAILED -> "failed"
     }
 
-    // A flat card: the call, its identifying argument, and its output, all
-    // visible. An earlier version expanded on tap, and the animation read as
-    // noise in a stream that is already dense.
+    // Tap toggles visibility with no animation: the transition read as noise in
+    // an already dense stream. Collapsed shows one identifying line; expanded
+    // shows the argument and output in full, untruncated, because a truncated
+    // output is what forces a trip back to the desktop.
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
             .background(Color(0xFF1A1D23), RoundedCornerShape(8.dp))
+            .clickable { expanded = !expanded }
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (expanded) "v" else ">",
+                color = MUTED,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.width(12.dp),
+            )
             Text(
                 text = call.name,
                 color = accent,
@@ -829,34 +846,36 @@ private fun ToolCard(call: TranscriptItem.ToolCall) {
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = status,
-                color = if (call.failed) WARN else MUTED,
+                text = statusLabel,
+                color = if (call.status == TranscriptItem.ToolCall.Status.FAILED) WARN else MUTED,
                 fontSize = 10.sp,
             )
         }
         if (!preview.isNullOrBlank()) {
-            SelectionContainer {
-                Text(
-                    text = preview.trim().take(600),
-                    color = Color(0xFFB9C1CE),
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(top = 3.dp),
-                )
-            }
+            Text(
+                text = if (expanded) preview.trim() else preview.replace("\n", " ").trim().take(120),
+                color = Color(0xFFB9C1CE),
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = if (expanded) Int.MAX_VALUE else 1,
+                modifier = Modifier.padding(start = 12.dp, top = 3.dp),
+            )
         }
-        val output = call.result
-        if (!output.isNullOrBlank()) {
-            Spacer(Modifier.height(5.dp))
-            SelectionContainer {
-                Text(
-                    text = output.trim().take(4000),
-                    color = if (call.failed) WARN else Color(0xFF8A93A5),
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
+        if (expanded) {
+            val output = call.result
+            if (!output.isNullOrBlank()) {
+                Spacer(Modifier.height(5.dp))
+                SelectionContainer {
+                    Text(
+                        text = output.trim(),
+                        color = if (call.status == TranscriptItem.ToolCall.Status.FAILED) WARN
+                        else Color(0xFF8A93A5),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
             }
         }
     }
