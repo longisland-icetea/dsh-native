@@ -78,6 +78,7 @@ dependencies {
     // dependency worth its ~1 MB here, because the multiplexed stream socket
     // and HTTP calls share a connection pool and both need sane timeouts.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("junit:junit:4.13.2")
     // No syntax-highlighting library: every candidate was either absent from
     // Maven Central or drags in a WebView/grammar assets. CodeBlocks.kt is a
     // small tokenizer instead.

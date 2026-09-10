@@ -219,10 +219,7 @@ class DshClient(
 
     suspend fun listSessions(): List<SessionSummary> {
         val value = call("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
-        val items = (value as? JsonObject)?.get("items") as? JsonArray ?: return emptyList()
-        return items.mapNotNull { element ->
-            runCatching { json.decodeFromJsonElement(SessionSummary.serializer(), element) }.getOrNull()
-        }
+        return SessionListCodec.parse(value)
     }
 
     suspend fun prompt(sessionId: String, text: String) {

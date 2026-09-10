@@ -119,6 +119,44 @@ data class SessionSummary(
             ?: sessionId.takeLast(8)
 }
 
+/**
+ * Decode `session/list` by hand.
+ *
+ * A generated serializer is the wrong tool here: `projections.values` holds
+ * heterogeneous server-owned state (`goal` is null or a string, `permissions`
+ * and `modelSelection` are nested objects, `turnOutline` is an array), so
+ * strict decoding throws on the first shape it does not know and the item is
+ * silently dropped — which presents as "connected, but no sessions". Only the
+ * fields this client renders are read, and anything unexpected is ignored.
+ */
+object SessionListCodec {
+    fun parse(value: JsonElement): List<SessionSummary> {
+        val items = (value as? JsonObject)?.get("items") as? JsonArray ?: return emptyList()
+        return items.mapNotNull { element ->
+            val obj = element as? JsonObject ?: return@mapNotNull null
+            val sessionId = obj.string("sessionId") ?: return@mapNotNull null
+            SessionSummary(
+                sessionId = sessionId,
+                updatedAt = obj.long("updatedAt") ?: 0L,
+                running = obj.bool("running") ?: false,
+                blank = obj.bool("blank") ?: false,
+                cwd = obj.string("cwd"),
+                projections = obj["projections"],
+            )
+        }
+    }
+
+    private fun JsonObject.string(key: String): String? =
+        (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    private fun JsonObject.long(key: String): Long? =
+        (this[key] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+
+    private fun JsonObject.bool(key: String): Boolean? =
+        (this[key] as? JsonPrimitive)?.booleanOrNull
+}
+
+
 /** Session or subagent address; the union `kind` is required by the host. */
 @Serializable
 data class SessionAddress(val kind: String = "session", val sessionId: String)
