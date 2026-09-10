@@ -222,6 +222,8 @@ class DshClient(
         response.use {
             if (!it.isSuccessful) throw DshException("$method: HTTP ${it.code}")
             val text = it.body?.string() ?: throw DshException("$method: empty body")
+            // OkHttp advertises gzip and decodes it transparently, so `text` is
+            // already plain JSON here; no manual gunzip is needed or wanted.
             val parsed = json.decodeFromString<RpcResponse>(text)
             if (parsed.rpcId != rpcId) throw DshException("$method: rpcId mismatch")
             val result = parsed.result
@@ -230,9 +232,46 @@ class DshClient(
         }
     }
 
-    suspend fun listSessions(): List<SessionSummary> {
-        val value = call("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
-        return SessionListCodec.parse(value)
+    suspend fun listSessions(): List<SessionSummary> = listSessionsDetailed().first
+
+    /**
+     * `session/list` plus the decoded body size.
+     *
+     * The size is not decoration: when the list comes back empty the first
+     * question is whether the body arrived at all and whether it was the JSON
+     * this client expects. A failed decode now reports the first bytes instead
+     * of an empty list.
+     */
+    suspend fun listSessionsDetailed(): Pair<List<SessionSummary>, Int> {
+        val body = callRaw("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
+        val text = body.toString(Charsets.UTF_8)
+        val parsed = runCatching { json.decodeFromString<RpcResponse>(text) }
+            .getOrElse { error ->
+                throw DshException("session/list body is not the expected envelope (${body.size}B): ${text.take(120)}", error)
+            }
+        val result = parsed.result
+        if (!result.ok) throw DshException("session/list refused: ${result.error}")
+        val value = result.value ?: throw DshException("session/list returned no value")
+        val sessions = SessionListCodec.parse(value)
+        if (sessions.isEmpty()) {
+            throw DshException("session/list decoded 0 items from ${body.size}B: ${text.take(120)}")
+        }
+        return sessions to body.size
+    }
+
+    /** One POST, returning the decoded body bytes. */
+    private suspend fun callRaw(method: String, args: JsonObject): ByteArray {
+        val rpcId = UUID.randomUUID().toString()
+        val body = json.encodeToString(RpcRequest(rpcId = rpcId, method = method, payload = RpcPayload(args)))
+        val request = Request.Builder()
+            .url("${endpoint.httpBase}${DshWire.API_PREFIX}/$method")
+            .post(body.toRequestBody(jsonMedia))
+            .build()
+        val response = http.newCall(request).await()
+        response.use {
+            if (!it.isSuccessful) throw DshException("$method: HTTP ${it.code}")
+            return it.body?.bytes() ?: throw DshException("$method: empty body")
+        }
     }
 
     suspend fun prompt(sessionId: String, text: String) {

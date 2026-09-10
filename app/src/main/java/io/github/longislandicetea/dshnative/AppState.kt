@@ -41,6 +41,10 @@ data class AppState(
     val conversation: Conversation? = null,
     val busy: Boolean = false,
     val log: List<String> = emptyList(),
+    /** Last session-list failure, surfaced in the drawer. */
+    val sessionsError: String? = null,
+    /** Bytes of the last session/list body, decompressed; a cheap sanity check. */
+    val sessionsBytes: Int = 0,
 )
 
 /**
@@ -74,9 +78,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
             }
         }
         scope.launch {
-            created.log.collect { line ->
-                _state.update { it.copy(log = (listOf(line) + it.log).take(80)) }
-            }
+            created.log.collect { line -> record(line) }
         }
         refreshSessions()
     }
@@ -92,12 +94,28 @@ class AppStateHolder(private val scope: CoroutineScope) {
     }
 
     fun refreshSessions() {
-        val active = client ?: return
-        scope.launch {
-            runCatching { active.listSessions() }
-                .onSuccess { sessions -> _state.update { it.copy(sessions = sessions) } }
-                .onFailure { error -> _state.update { it.copy(log = (listOf("session/list failed: ${error.message}") + it.log).take(80)) } }
+        val active = client ?: run {
+            record("refresh skipped: no client yet")
+            return
         }
+        scope.launch {
+            _state.update { it.copy(sessionsError = null) }
+            runCatching { active.listSessionsDetailed() }
+                .onSuccess { (sessions, bytes) ->
+                    record("session/list ok: ${sessions.size} sessions, ${bytes}B")
+                    _state.update { it.copy(sessions = sessions, sessionsBytes = bytes, sessionsError = null) }
+                }
+                .onFailure { error ->
+                    val message = "${error::class.simpleName}: ${error.message}"
+                    record("session/list FAILED: $message")
+                    _state.update { it.copy(sessionsError = message) }
+                }
+        }
+    }
+
+    /** Append one line to the in-app log the drawer shows. */
+    private fun record(line: String) {
+        _state.update { it.copy(log = (listOf(line) + it.log).take(80)) }
     }
 
     fun openSession(session: SessionSummary) {

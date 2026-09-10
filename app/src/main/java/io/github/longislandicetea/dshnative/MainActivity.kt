@@ -252,8 +252,12 @@ private fun SessionDrawer(
             Column(Modifier.weight(1f)) {
                 Text("Sessions", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Text(
-                    text = if (state.connected) "live" else "offline",
-                    color = if (state.connected) MUTED else WARN,
+                    text = when {
+                        !state.connected -> "offline"
+                        state.sessionsError != null -> "list failed"
+                        else -> "${state.sessions.size} sessions · ${state.sessionsBytes}B"
+                    },
+                    color = if (state.sessionsError != null || !state.connected) WARN else MUTED,
                     fontSize = 11.sp,
                 )
             }
@@ -262,8 +266,26 @@ private fun SessionDrawer(
                 Icon(Icons.Filled.Settings, contentDescription = "Connection")
             }
         }
+        state.sessionsError?.let { message ->
+            Text(
+                text = message,
+                color = WARN,
+                fontSize = 11.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
         HorizontalDivider(color = Color(0xFF2A2E38))
         LazyColumn(Modifier.fillMaxSize()) {
+            if (state.sessions.isEmpty() && state.sessionsError == null) {
+                item {
+                    Text(
+                        text = if (state.connected) "No sessions reported yet. Pull Refresh."
+                        else "Not connected.",
+                        color = MUTED, fontSize = 12.sp,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+            }
             items(state.sessions, key = { it.sessionId }) { session ->
                 val active = state.conversation?.sessionId == session.sessionId
                 Column(
@@ -288,6 +310,16 @@ private fun SessionDrawer(
                     }
                 }
                 HorizontalDivider(color = Color(0xFF23262E))
+            }
+            if (state.log.isNotEmpty()) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                        Text("LOG", color = MUTED, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                        state.log.take(6).forEach { line ->
+                            Text(line, color = Color(0xFF6C7484), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
             }
         }
     }
