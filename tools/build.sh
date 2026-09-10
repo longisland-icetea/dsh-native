@@ -54,23 +54,21 @@ mkdir -p "$OUT/res-compiled" "$OUT/classes" "$OUT/dex" "$OUT/gen"
 
 # ── 1. resources ─────────────────────────────────────────────────────────────
 echo "== aapt2 compile"
-# Compile file by file, grouping output by resource type. `aapt2 compile --dir`
-# exits 0 while emitting an empty archive for this tree, which then fails later
-# as "resource string/app_name not found"; the per-file form is reliable.
-aapt2_compile_files() {
-  local type dir out
-  for dir in "$ROOT"/app/src/main/res/*/; do
-    [ -d "$dir" ] || continue
-    type="$(basename "$dir")"
-    out="$OUT/res-compiled/$type"
-    mkdir -p "$out"
-    local files=()
-    while IFS= read -r -d '' f; do files+=("$f"); done < <(find "$dir" -maxdepth 1 -type f -print0)
-    [ "${#files[@]}" -gt 0 ] || continue
-    "$BT/aapt2" compile -o "$out" "${files[@]}"
-  done
-}
-aapt2_compile_files
+# Application and library resources go through one merged tree, because aapt2
+# derives a resource's NAME from its file name: renaming files to dodge
+# collisions (an earlier attempt) renamed the resources and broke every
+# reference to them. tools/merge-res.py merges values files element-wise and
+# copies the rest verbatim instead.
+STAGE="$OUT/res-stage"
+TREES=("$ROOT/app/src/main/res")
+if [ -f "$M2/res-dirs.txt" ]; then
+  while IFS= read -r dir; do
+    [ -n "$dir" ] && [ -d "$dir" ] && TREES+=("$dir")
+  done < "$M2/res-dirs.txt"
+fi
+python3 "$ROOT/tools/merge-res.py" "$STAGE" "${TREES[@]}"
+echo "   library res trees: $(( ${#TREES[@]} - 1 ))"
+"$BT/aapt2" compile --dir "$STAGE" -o "$OUT/res.zip"
 
 echo "== aapt2 link"
 "$BT/aapt2" link \
@@ -81,7 +79,7 @@ echo "== aapt2 link"
   --min-sdk-version 29 \
   --target-sdk-version 36 \
   --version-code 1 --version-name 0.1.0 \
-  $(find "$OUT/res-compiled" -name '*.flat' | sort)
+  "$OUT/res.zip"
 
 # ── 2. R.java ────────────────────────────────────────────────────────────────
 echo "== javac R.java"

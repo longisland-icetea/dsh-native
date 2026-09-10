@@ -197,20 +197,43 @@ def main():
     print(f"after version arbitration: {len(deduped)} artifacts")
 
     classes = []
+    res_dirs = []
     for key, path, ext in deduped:
         if ext == "aar":
             target_dir = os.path.join(OUT, "classes", key.replace(":", "_"))
             os.makedirs(target_dir, exist_ok=True)
             with zipfile.ZipFile(path) as archive:
-                if "classes.jar" in archive.namelist():
+                names = archive.namelist()
+                if "classes.jar" in names:
                     target = os.path.join(target_dir, "classes.jar")
                     with archive.open("classes.jar") as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst)
                     classes.append(target)
-            # jni/ and res/ are deliberately ignored: this client ships no native
-            # libraries, and aapt2 links resources from its own sources.
+                # The aar's own res/ must reach aapt2. Compose UI and Material3
+                # carry hundreds of resources (themes, dimens, colors); without
+                # them the app dies at startup resolving its Material theme, and
+                # the launcher icon and any library drawable are missing too.
+                # jni/ stays excluded: this client ships no native libraries.
+                if any(n.startswith("res/") for n in names):
+                    res_root = os.path.join(target_dir, "res")
+                    extracted = False
+                    for name in names:
+                        if not name.startswith("res/") or name.endswith("/"):
+                            continue
+                        dest = os.path.join(target_dir, name)
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        with archive.open(name) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        extracted = True
+                    if extracted:
+                        res_dirs.append(res_root)
         else:
             classes.append(path)
+
+    res_listing = os.path.join(OUT, "res-dirs.txt")
+    with open(res_listing, "w") as handle:
+        handle.write("\n".join(res_dirs) + ("\n" if res_dirs else ""))
+    print(f"resource dirs: {len(res_dirs)} -> {res_listing}")
 
     listing = os.path.join(OUT, "classpath.txt")
     with open(listing, "w") as handle:
