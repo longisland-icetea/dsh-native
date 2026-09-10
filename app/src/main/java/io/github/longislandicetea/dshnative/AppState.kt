@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import android.util.Log
@@ -24,6 +26,34 @@ import android.util.Log
  * Until it is answered the agent stays blocked, so these are the only items the
  * UI must never let a user miss.
  */
+/** One question in a user-questions request. */
+@Serializable
+data class QuestionItem(
+    val id: String,
+    val question: String,
+    val detail: String? = null,
+    val header: String? = null,
+    val options: List<QuestionOption> = emptyList(),
+    val multiSelect: Boolean? = null,
+)
+
+@Serializable
+data class QuestionOption(val label: String, val description: String? = null)
+
+@Serializable
+data class QuestionRequest(val questions: List<QuestionItem> = emptyList())
+
+/** The answer batch a user-questions waterfall returns. */
+@Serializable
+data class QuestionAnswer(val answers: List<QuestionAnswerItem> = emptyList())
+
+@Serializable
+data class QuestionAnswerItem(
+    val id: String,
+    val selected: List<String> = emptyList(),
+    val custom: String? = null,
+)
+
 data class PendingInteraction(
     val sessionId: String,
     val eventId: String,
@@ -33,6 +63,8 @@ data class PendingInteraction(
     val reason: String?,
     /** Answer values this presentation offers, in display order. */
     val choices: List<Choice>,
+    /** Populated for a user-questions request. */
+    val questions: List<QuestionItem> = emptyList(),
 ) {
     data class Choice(val label: String, val value: String)
 
@@ -58,9 +90,29 @@ data class PendingInteraction(
                     reason = field("reason"),
                     choices = APPROVAL_CHOICES,
                 )
-                // Questions and plan reviews are answered with free text or a
-                // selection; wire them once their request shapes are confirmed
-                // rather than guessing a payload the Host would reject.
+                // Questions and plan reviews arrive on their own event: the
+                // answer is a structured batch keyed by question id, not a
+                // single decision string.
+                "user-questions/request" -> {
+                    val questions = runCatching {
+                        DshWire.json.decodeFromJsonElement(
+                            QuestionRequest.serializer(),
+                            (request["questions"] ?: JsonNull),
+                        ).questions
+                    }.getOrDefault(emptyList())
+                    if (questions.isEmpty()) null else PendingInteraction(
+                        sessionId = event.agentId,
+                        eventId = event.eventId,
+                        kind = if (questions.size == 1 && questions[0].detail != null &&
+                            questions[0].options.size <= 2 && questions[0].multiSelect != true
+                        ) "plan-review" else "question",
+                        toolName = null,
+                        callId = null,
+                        reason = null,
+                        choices = emptyList(),
+                        questions = questions,
+                    )
+                }
                 else -> null
             }
         }
@@ -217,6 +269,10 @@ data class AppState(
     /** Group keys (cwd) the user collapsed. */
     val collapsed: Set<String> = emptySet(),
     val showArchived: Boolean = false,
+    /** Routable models, loaded when the picker first opens. */
+    val catalog: ModelCatalog? = null,
+    /** Provider/model/effort currently in force for the open conversation. */
+    val selection: ModelSelection? = null,
 ) {
     /** Sessions grouped and ordered for the drawer. */
     val groups: List<SessionGroup>
@@ -428,6 +484,78 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
+    /** Load the model catalog once, for the picker. */
+    fun loadCatalog() {
+        val active = client ?: return
+        if (_state.value.catalog != null) return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.modelCatalog() }
+                .onSuccess { catalog ->
+                    record("catalog: ${catalog.groups.size} providers")
+                    _state.update { it.copy(catalog = catalog) }
+                }
+                .onFailure { record("catalog failed: ${it.message}") }
+        }
+    }
+
+    /** Switch model and reasoning effort for the open conversation. */
+    fun selectModel(provider: String, model: String, reasoningEffort: String?) {
+        val active = client ?: return
+        val conversation = _state.value.conversation ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.selectModel(conversation.sessionId, provider, model, reasoningEffort) }
+                .onSuccess { selected ->
+                    record("model: ${selected.provider}/${selected.model} ${selected.reasoningEffort ?: ""}")
+                    _state.update { it.copy(selection = selected) }
+                }
+                .onFailure { record("selectModel failed: ${it.message}") }
+        }
+    }
+
+    /** Run a slash command such as `/compact` against the open conversation. */
+    fun runCommand(line: String) {
+        val active = client ?: return
+        val conversation = _state.value.conversation ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.runCommand(conversation.sessionId, line) }
+                .onSuccess { record("command sent: $line") }
+                .onFailure { record("command failed: ${it.message}") }
+        }
+    }
+
+    /**
+     * Answer a user-questions request.
+     *
+     * The waterfall's return value is the structured batch
+     * `{answers:[{id, selected, custom?}]}`, keyed by the caller's question ids,
+     * so one call answers the whole batch rather than one question at a time.
+     */
+    fun answerQuestions(interaction: PendingInteraction, selected: Map<String, List<String>>, custom: Map<String, String>) {
+        val active = client ?: return
+        val clientId = eventClientId ?: return
+        val batch = QuestionAnswer(
+            answers = interaction.questions.map { question ->
+                QuestionAnswerItem(
+                    id = question.id,
+                    selected = selected[question.id] ?: emptyList(),
+                    custom = custom[question.id],
+                )
+            },
+        )
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                active.answerWaterfall(
+                    clientId,
+                    interaction.eventId,
+                    DshWire.json.encodeToJsonElement(QuestionAnswer.serializer(), batch),
+                )
+            }
+                .onSuccess { record("answered question batch (${batch.answers.size})") }
+                .onFailure { record("answer failed: ${it.message}") }
+            _state.update { it.copy(pending = it.pending.filterNot { p -> p.eventId == interaction.eventId }) }
+        }
+    }
+
     /** Answer one pending interaction; the value is the waterfall's return value. */
     fun answer(interaction: PendingInteraction, value: String) {
         val active = client ?: return
@@ -497,6 +625,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     }
 
     fun openSession(session: SessionSummary) {
+        // The summary already carries the session's model selection inside its
+        // projections, so the picker opens showing the truth rather than waiting
+        // for a catalog round trip.
+        val selection = projectionsOf(session.projections)
+            ?.modelSelection
+            ?.let { it.next ?: it.lastUsed }
         _state.update {
             it.copy(
                 conversation = Conversation(
@@ -504,9 +638,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     title = session.title,
                     running = session.running,
                 ),
+                selection = selection,
             )
         }
         openFollow(session.sessionId, session.title)
+        loadCatalog()
     }
 
     fun closeSession() {

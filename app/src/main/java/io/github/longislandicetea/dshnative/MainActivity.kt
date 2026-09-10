@@ -54,6 +54,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -537,6 +538,8 @@ private fun PendingCard(interaction: PendingInteraction, holder: AppStateHolder)
             Text(
                 text = when (interaction.kind) {
                     "approval" -> "Approval required"
+                    "question" -> "Question"
+                    "plan-review" -> "Plan review"
                     else -> interaction.kind
                 },
                 color = WARN,
@@ -552,12 +555,103 @@ private fun PendingCard(interaction: PendingInteraction, holder: AppStateHolder)
                 Text(it, fontSize = 12.sp, color = MUTED)
             }
             Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                interaction.choices.forEach { choice ->
-                    TextButton(onClick = { holder.answer(interaction, choice.value) }) {
-                        Text(choice.label, fontSize = 13.sp)
+            if (interaction.questions.isEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    interaction.choices.forEach { choice ->
+                        TextButton(onClick = { holder.answer(interaction, choice.value) }) {
+                            Text(choice.label, fontSize = 13.sp)
+                        }
                     }
                 }
+            } else {
+                QuestionBody(interaction, holder)
+            }
+        }
+    }
+}
+
+/**
+ * Render a user-questions batch.
+ *
+ * Single-select questions settle as soon as an option is chosen; a question
+ * with no options (or a multi-select one) also offers a text field, because the
+ * Host accepts free text alongside or instead of a selection and refusing to
+ * send it would strand the agent.
+ */
+@Composable
+private fun QuestionBody(interaction: PendingInteraction, holder: AppStateHolder) {
+    val selected = remember(interaction.eventId) { mutableStateMapOf<String, List<String>>() }
+    val custom = remember(interaction.eventId) { mutableStateMapOf<String, String>() }
+
+    fun submit() = holder.answerQuestions(interaction, selected.toMap(), custom.toMap())
+
+    Column {
+        interaction.questions.forEach { question ->
+            question.header?.let {
+                Text(it.uppercase(), color = MUTED, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Text(question.question, fontSize = 13.sp, modifier = Modifier.padding(top = 2.dp))
+            question.detail?.let {
+                Text(it.take(600), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+            val options = question.options
+            if (options.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                options.forEach { option ->
+                    val isSelected = selected[question.id]?.contains(option.label) == true
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (question.multiSelect == true) {
+                                    val current = selected[question.id].orEmpty()
+                                    selected[question.id] =
+                                        if (isSelected) current - option.label else current + option.label
+                                } else {
+                                    // Single select answers immediately: a second
+                                    // tap target would add a step for nothing.
+                                    selected[question.id] = listOf(option.label)
+                                    submit()
+                                }
+                            }
+                            .background(
+                                if (isSelected) Color(0xFF33405A) else Color(0xFF23262E),
+                                RoundedCornerShape(8.dp),
+                            )
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Text(option.label, fontSize = 13.sp)
+                        option.description?.let {
+                            Text(it, color = MUTED, fontSize = 11.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                }
+            }
+            if (options.isEmpty() || question.multiSelect == true) {
+                var draft by remember(question.id) { mutableStateOf("") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextField(
+                        value = draft,
+                        onValueChange = {
+                            draft = it
+                            custom[question.id] = it
+                        },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("Answer", fontSize = 12.sp, color = MUTED) },
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                        ),
+                    )
+                }
+            }
+        }
+        if (interaction.questions.size > 1 || interaction.questions.any { it.multiSelect == true || it.options.isEmpty() }) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { submit() }) { Text("Submit", fontSize = 13.sp) }
             }
         }
     }

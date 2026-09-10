@@ -351,6 +351,47 @@ class DshClient(
      */
     fun workspaces(): Flow<MuxFrame> = openStream("workspace/follow", buildJsonObject { })
 
+    /** Every routable provider, its models, and their reasoning efforts. */
+    suspend fun modelCatalog(): ModelCatalog {
+        val args = buildJsonObject { put("request", buildJsonObject { }) }
+        val value = call("session/modelCatalog", args)
+        return runCatching {
+            json.decodeFromJsonElement(ModelCatalog.serializer(), value)
+        }.getOrDefault(ModelCatalog())
+    }
+
+    /** Switch the session's model and reasoning effort. */
+    suspend fun selectModel(
+        sessionId: String,
+        provider: String,
+        model: String,
+        reasoningEffort: String?,
+    ): ModelSelection {
+        val request = SelectModelRequest(sessionId, provider, model, reasoningEffort)
+        val args = buildJsonObject {
+            put("request", json.encodeToJsonElement(SelectModelRequest.serializer(), request))
+        }
+        val value = call("session/selectModel", args)
+        return runCatching {
+            json.decodeFromJsonElement(SelectModelValue.serializer(), value).selected
+        }.getOrDefault(ModelSelection(provider, model, reasoningEffort))
+    }
+
+    /**
+     * Run a slash command.
+     *
+     * Commands are not a separate transport: the Host executes the line against
+     * the session's agent. Compaction is therefore reachable as a command line,
+     * and its effect arrives as ordinary compaction events on the follow stream.
+     */
+    suspend fun runCommand(sessionId: String, line: String) {
+        val args = buildJsonObject {
+            put("agentId", JsonPrimitive(sessionId))
+            put("line", JsonPrimitive(line))
+        }
+        call("commands/execute", args)
+    }
+
     /** Archive one session; the Host answers with the complete resulting set. */
     suspend fun archiveSession(sessionId: String): List<String> {
         val args = buildJsonObject {
@@ -504,17 +545,4 @@ class DshClient(
     private fun log(line: String) {
         _log.tryEmit("${System.currentTimeMillis() % 1_000_000}  $line")
     }
-}
-
-private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
-    enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) {
-            if (cont.isActive) cont.resumeWithException(e)
-        }
-
-        override fun onResponse(call: Call, response: Response) {
-            cont.resume(response)
-        }
-    })
-    cont.invokeOnCancellation { runCatching { cancel() } }
 }

@@ -192,6 +192,102 @@ data class WorkspaceIncrement(
 @Serializable
 data class ArchiveSessionRequest(val sessionId: String)
 
+/**
+ * The projection values the client reads.
+ *
+ * `session/list` and `session/follow` both carry `projections.values`, a map of
+ * derived session facts. Only the ones the UI shows are modelled; the map holds
+ * far more (turn outlines, subagent catalogs, permissions) and is deliberately
+ * not given a closed schema, because strict decoding of it is what once made the
+ * session list come back empty.
+ */
+@Serializable
+data class ProjectionValues(
+    val title: String? = null,
+    val modelSelection: ProjectionModelSelection? = null,
+    val tokenUsage: TokenUsage? = null,
+    val contextPressure: ContextPressure? = null,
+)
+
+@Serializable
+data class ProjectionModelSelection(
+    val lastUsed: ModelSelection? = null,
+    val next: ModelSelection? = null,
+)
+
+@Serializable
+data class TokenUsage(
+    val uncachedInputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cacheReadTokens: Long = 0,
+)
+
+@Serializable
+data class ContextPressure(
+    val pressureTokens: Long = 0,
+    val projectedTokens: Long = 0,
+    val contextWindow: Long = 0,
+)
+
+/** Read the projection values out of a session summary or event payload. */
+fun projectionsOf(element: JsonElement?): ProjectionValues? {
+    val values = (element as? JsonObject)?.get("values") ?: return null
+    return runCatching {
+        DshWire.json.decodeFromJsonElement(ProjectionValues.serializer(), values)
+    }.getOrNull()
+}
+
+/** One selectable provider/model pair, with its reasoning options. */
+@Serializable
+data class ModelEntry(
+    val id: String,
+    val name: String? = null,
+    val description: String? = null,
+    val reasoning: ModelReasoning? = null,
+)
+
+@Serializable
+data class ModelReasoning(
+    val efforts: List<ReasoningEffort> = emptyList(),
+    val defaultEffort: String? = null,
+)
+
+@Serializable
+data class ReasoningEffort(val id: String, val name: String? = null, val description: String? = null)
+
+@Serializable
+data class ModelProviderGroup(
+    val id: String,
+    val name: String? = null,
+    val models: List<ModelEntry> = emptyList(),
+)
+
+@Serializable
+data class ModelCatalog(
+    val default: ModelSelection = ModelSelection(),
+    val routableProviders: List<String> = emptyList(),
+    val groups: List<ModelProviderGroup> = emptyList(),
+)
+
+/** Current or requested provider/model/reasoning choice. */
+@Serializable
+data class ModelSelection(
+    val provider: String = "",
+    val model: String = "",
+    val reasoningEffort: String? = null,
+)
+
+@Serializable
+data class SelectModelRequest(
+    val sessionId: String,
+    val provider: String,
+    val model: String,
+    val reasoningEffort: String? = null,
+)
+
+@Serializable
+data class SelectModelValue(val selected: ModelSelection = ModelSelection())
+
 @Serializable
 data class ArchiveValue(val archivedSessionIds: List<String> = emptyList())
 
