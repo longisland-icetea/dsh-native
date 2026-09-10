@@ -555,7 +555,9 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                     title = {
                         Column {
                             Text(
-                                text = state.conversation?.title?.ifEmpty { "DSH Native" } ?: "DSH Native",
+                                // The harness's own name, matching the launcher
+                                // label rather than a second spelling of it.
+                                text = state.conversation?.title?.ifEmpty { "DSH" } ?: "DSH",
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,

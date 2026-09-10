@@ -72,6 +72,15 @@ Guessing an event payload has broken this app twice (the tool-result fold and th
 
 The resulting table lives in `docs/event-coverage.md`.
 
+## Icons
+
+`python3 tools/make-icons.py` regenerates the launcher icons from the harness's
+own `favicon.svg`. There is no SVG rasteriser in this VM and the build must not
+gain one, so the script flattens the path itself and supersamples with Pillow.
+It only implements `M`, `C`, and `Z`, and it fails loudly if the source grows any
+other command — a silently mis-drawn product mark is worse than a failed build.
+Re-run it after a DSH upgrade that changes the icon, and commit the PNGs.
+
 ## Editing hazard
 
 `tools/*.py` that patch sources use a `sub()` helper that raises when its anchor
