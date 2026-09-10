@@ -162,18 +162,29 @@ data class SessionEvent(
     /** Text this event contributes to the transcript, when it carries any. */
     val text: String?
         get() = when (type) {
-            "user/message", "assistant/message", "system/message" -> extractText(data)
+            "user/message", "assistant/message", "system/message" -> EventPayload.textOf(this)
             else -> null
         }
 
     /** Compact one-line description for events rendered as activity. */
     val label: String
         get() = when (type) {
-            "tool/call" -> "tool: " + (data.jsonObject["name"]?.jsonPrimitive?.contentOrNull ?: "?")
-            "tool/result" -> "tool result"
-            "step/start" -> "step started"
-            "step/end" -> "step finished"
+            "tool/call" -> EventPayload.toolCallOf(this)?.first?.let { "→ $it" } ?: "→ tool"
+            "tool/result" -> "← result"
+            "step/start" -> "step"
+            "step/end" -> "step done"
+            "turn/start" -> "turn started"
+            "turn/end" -> "turn finished"
+            "agent/inbox/spliced" -> "inbox"
             else -> type
+        }
+
+    /** Secondary line for activity rows (tool arguments, tool output). */
+    val detail: String?
+        get() = when (type) {
+            "tool/call" -> EventPayload.toolCallOf(this)?.second
+            "tool/result" -> EventPayload.textOf(this)?.replace('\n', ' ')?.take(200)
+            else -> null
         }
 }
 
@@ -219,7 +230,9 @@ object FollowCodec {
         if (obj["type"]?.jsonPrimitive?.contentOrNull != "chunk") return null
         return FollowFrame.AssistantChunk(
             index = obj["index"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
-            text = extractText(obj["chunk"]),
+            // A chunk carries the same block shape as a finished message, so the
+            // same text-only filter applies (reasoning deltas are not the reply).
+            text = chunkText(obj["chunk"]),
         )
     }
 
@@ -236,33 +249,83 @@ object FollowCodec {
     }
 }
 
+/** One content block inside a message. Only `text` is rendered as prose. */
+@Serializable
+data class ContentBlock(
+    val type: String,
+    val text: String? = null,
+    val name: String? = null,
+    val arguments: String? = null,
+)
+
+/** The `message` wrapper both the transcript and tool results use. */
+@Serializable
+data class WireMessage(
+    val role: String? = null,
+    val content: List<ContentBlock> = emptyList(),
+)
+
 /**
- * Pull human-readable text out of an event or chunk payload.
+ * Decode the payloads of the event types the transcript renders.
  *
- * The host publishes no closed schema for `data`, so this walks the shapes the
- * wire actually uses (a string primitive, a `text` field, an OpenAI-style
- * `content` array, a `message` wrapper) rather than betting on one exact path.
- * Returns null when nothing matches and the caller falls back to a structural
- * summary.
+ * Shapes measured against a live host:
+ *  - `user/message`      -> `data.content[]` where every block is `text`
+ *  - `assistant/message` -> `data.message.content[]` with `reasoning`, `text`
+ *    and `tool-call` blocks **mixed together**
+ *  - `tool/call`         -> `data.name`, `data.arguments` (a JSON string)
+ *  - `tool/result`       -> `data.message` (same message wrapper)
+ *
+ * `reasoning` is deliberately dropped: it is the model's private thinking and
+ * joining it into the transcript would show walls of chain-of-thought as if it
+ * were the reply.
  */
-fun extractText(element: JsonElement?): String? {
-    (element as? JsonPrimitive)?.takeIf { it.isString }?.let { return it.content }
-    val obj = element as? JsonObject ?: return null
+object EventPayload {
+    private val json = DshWire.json
 
-    (obj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.let { return it.content }
-
-    (obj["content"] as? JsonArray)?.let { content ->
-        val joined = content.joinToString("") { part ->
-            when (part) {
-                is JsonPrimitive -> if (part.isString) part.content else ""
-                is JsonObject -> (part["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: ""
-                else -> ""
-            }
+    private fun blocksOf(element: JsonElement?): List<ContentBlock> {
+        val obj = element as? JsonObject ?: return emptyList()
+        val container = (obj["message"] as? JsonObject) ?: obj
+        val array = container["content"] as? JsonArray ?: return emptyList()
+        return array.mapNotNull { part ->
+            runCatching { json.decodeFromJsonElement(ContentBlock.serializer(), part) }.getOrNull()
         }
-        if (joined.isNotEmpty()) return joined
     }
 
-    obj["message"]?.let { message -> extractText(message)?.let { return it } }
-    obj["chunk"]?.let { chunk -> extractText(chunk)?.let { return it } }
-    return null
+    /** Visible text of one event, or null when it carries none. */
+    fun textOf(event: SessionEvent): String? {
+        val joined = blocksOf(event.data)
+            .filter { it.type == "text" }
+            .mapNotNull { it.text }
+            .joinToString("\n")
+        return joined.ifBlank { null }
+    }
+
+    /** `tool/call` specifics: the tool name and a one-line argument preview. */
+    fun toolCallOf(event: SessionEvent): Pair<String, String?>? {
+        val obj = event.data as? JsonObject ?: return null
+        val name = (obj["name"] as? JsonPrimitive)?.contentOrNull ?: return null
+        val arguments = (obj["arguments"] as? JsonPrimitive)?.contentOrNull
+        return name to arguments?.replace('\n', ' ')?.take(160)
+    }
+
+    /**
+     * Visible text of one live assistant chunk.
+     *
+     * A streamed delta uses the same block shape as a finished message, so the
+     * `type == "text"` filter matters most here: a reasoning delta appended to
+     * the live bubble would be indistinguishable from the answer while it
+     * streams. A bare string chunk is accepted as-is because some frames carry
+     * plain concatenated text.
+     */
+    fun chunkText(chunk: JsonElement?): String? {
+        (chunk as? JsonPrimitive)?.takeIf { it.isString }?.let { return it.content }
+        val obj = chunk as? JsonObject ?: return null
+        (obj["type"] as? JsonPrimitive)?.contentOrNull?.let { kind ->
+            if (kind != "text") return null
+        }
+        val joined = blocksOf(obj).filter { it.type == "text" }.mapNotNull { it.text }.joinToString("")
+        if (joined.isNotEmpty()) return joined
+        return (obj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+    }
 }
+

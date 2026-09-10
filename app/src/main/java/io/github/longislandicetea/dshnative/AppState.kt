@@ -195,10 +195,13 @@ class AppStateHolder(private val scope: CoroutineScope) {
         val text = event.text
         return when {
             event.type == "user/message" && text != null -> TranscriptItem.User(key, text)
+            // An assistant message may carry only tool calls and no prose, which
+            // is a normal step rather than a renderable reply.
             event.type == "assistant/message" && text != null -> TranscriptItem.Assistant(key, text, streaming = false)
             event.type == "turn/end" -> TranscriptItem.Note(key, "turn finished")
+            event.type == "tool/result" -> TranscriptItem.Activity(key, event.label, event.detail)
             text != null -> TranscriptItem.Activity(key, event.label, text.take(400))
-            else -> TranscriptItem.Activity(key, event.label, null)
+            else -> TranscriptItem.Activity(key, event.label, event.detail)
         }
     }
 
