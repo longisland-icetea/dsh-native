@@ -571,6 +571,19 @@ object EventPayload {
     }
 
     /**
+     * Whether a user message came from a plugin rather than the human.
+     *
+     * Background-job results arrive as `user/message` with
+     * `source.kind == "plugin"` (10 of the 11 in a sampled turn), which renders
+     * as if the user had typed the harness's own status text. A real prompt
+     * carries `source.kind == "user"`.
+     */
+    fun isNotice(event: SessionEvent): Boolean {
+        val source = (event.data as? JsonObject)?.get("source") as? JsonObject ?: return false
+        return source["kind"]?.jsonPrimitive?.contentOrNull == "plugin"
+    }
+
+    /**
      * `tool/result` payload: the tool's output text and whether it failed.
      *
      * Measured shape: `data.message.content[]` holds exactly one `tool-result`

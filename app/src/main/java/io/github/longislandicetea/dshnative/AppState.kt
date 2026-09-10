@@ -705,7 +705,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // The snapshot is the newest window, not a delta: rebuild by seq so a
             // reconnect cannot duplicate or reorder what is already on screen.
             val merged = pairToolResults(
-                (conversation.items + frame.records.map(::toItem))
+                (conversation.items + frame.records.mapNotNull(::toItem))
                     .associateBy { it.key }
                     .values
                     .sortedBy(::seqOf),
@@ -722,7 +722,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
 
         is FollowFrame.Event -> conversation.copy(
-            items = pairToolResults((conversation.items + toItem(frame.event)).distinctBy { it.key }),
+            items = pairToolResults(
+                (conversation.items + listOfNotNull(toItem(frame.event))).distinctBy { it.key },
+            ),
             lastSeq = maxOf(conversation.lastSeq, frame.event.seq),
             running = when (frame.event.type) {
                 "turn/start" -> true
@@ -742,17 +744,28 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private fun seqOf(item: TranscriptItem): Long =
         item.key.removePrefix("seq-").toLongOrNull() ?: Long.MAX_VALUE
 
-    private fun toItem(event: SessionEvent): TranscriptItem {
+    private fun toItem(event: SessionEvent): TranscriptItem? {
         val key = "seq-${event.seq}"
         val text = event.text
         return when (event.type) {
-            "user/message" -> text?.let { TranscriptItem.User(key, it) }
-                ?: TranscriptItem.Activity(key, event.label, event.detail)
+            "user/message" -> when {
+                // A plugin-sourced user message is the harness talking to
+                // itself; only a human prompt is rendered as one.
+                EventPayload.isNotice(event) -> TranscriptItem.Note(key, text?.take(200) ?: "notice")
+                text != null -> TranscriptItem.User(key, text)
+                else -> null
+            }
             // An assistant message may carry only tool calls and no prose, which
             // is a normal step rather than a renderable reply.
             "assistant/message" -> text?.let { TranscriptItem.Assistant(key, it, streaming = false) }
                 ?: TranscriptItem.Activity(key, event.label, event.detail)
             "turn/end" -> TranscriptItem.Note(key, "turn finished")
+            // Rendering every step boundary, inbox splice and tool result buries
+            // the conversation: one sampled turn produced 315 such rows against
+            // 41 assistant messages. A tool result is folded into its call.
+            "step/start", "step/end", "agent/inbox/spliced",
+            "tool/result", "request/header", "request/context",
+            -> null
             "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
                 TranscriptItem.ToolCall(
                     key = key,
@@ -822,7 +835,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 _state.update { current ->
                     val live = current.conversation ?: return@update current
                     val merged = pairToolResults(
-                        (live.items + events.map(::toItem))
+                        (live.items + events.mapNotNull(::toItem))
                             .associateBy { it.key }
                             .values
                             .sortedBy(::seqOf),

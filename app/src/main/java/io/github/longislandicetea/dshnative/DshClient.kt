@@ -353,8 +353,9 @@ class DshClient(
 
     /** Every routable provider, its models, and their reasoning efforts. */
     suspend fun modelCatalog(): ModelCatalog {
-        val args = buildJsonObject { put("request", buildJsonObject { }) }
-        val value = call("session/modelCatalog", args)
+        // The descriptor declares no parameters; sending a `request` field is
+        // rejected with gateway/arguments-invalid.
+        val value = call("session/modelCatalog", buildJsonObject { })
         return runCatching {
             json.decodeFromJsonElement(ModelCatalog.serializer(), value)
         }.getOrDefault(ModelCatalog())
