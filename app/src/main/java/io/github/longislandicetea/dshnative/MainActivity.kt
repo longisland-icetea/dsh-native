@@ -119,6 +119,8 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     val scope = rememberCoroutineScope()
     var showSettings by remember { mutableStateOf(false) }
     val saved = remember { EndpointStore.load(context) }
+    // A delegated property cannot be smart-cast, so read it once per recomposition.
+    val endpoint = state.endpoint
 
     LaunchedEffect(Unit) {
         if (saved != null) DshEndpoint.parse(saved)?.let(holder::connect)
@@ -160,11 +162,10 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 maxLines = 1,
                             )
                             Text(
-                                text = when {
-                                    state.endpoint == null -> "not configured"
-                                    state.connected -> "connected · ${state.endpoint.host}"
-                                    else -> "reconnecting · ${state.endpoint.host}"
-                                },
+                                text = endpoint?.let { point ->
+                                    if (state.connected) "connected · ${point.host}"
+                                    else "reconnecting · ${point.host}"
+                                } ?: "not configured",
                                 fontSize = 11.sp,
                                 color = if (state.connected) MUTED else WARN,
                             )

@@ -24,6 +24,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,7 +49,7 @@ data class DshEndpoint(val host: String, val port: Int = 3080) {
             val trimmed = input.trim().removeSuffix("/")
             if (trimmed.isEmpty()) return null
             val withScheme = if (trimmed.contains("://")) trimmed else "http://$trimmed"
-            val url = runCatching { okhttp3.HttpUrl.Companion.toHttpUrl(withScheme) }.getOrNull() ?: return null
+            val url = runCatching { withScheme.toHttpUrl() }.getOrNull() ?: return null
             if (url.scheme != "http") return null
             return DshEndpoint(url.host, if (url.port != 0) url.port else 3080)
         }
