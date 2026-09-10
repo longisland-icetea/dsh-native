@@ -329,6 +329,41 @@ class DshClient(
      * Follow one session: the first frame is a snapshot carrying `cursor` plus
      * the newest records, then durable events and live assistant chunks.
      */
+    /**
+     * Forwarded Host events: the opening `ready` frame, notifications, and the
+     * agent-scoped waterfalls that carry approval prompts and user questions.
+     * A client that never opens this stream cannot be asked anything.
+     */
+    fun events(): Flow<MuxFrame> = openStream(DshWire.EVENT_STREAM_ENDPOINT, buildJsonObject { })
+
+    /**
+     * Answer one waterfall. The value is the listener's return value on the
+     * Host side, which is why the approval decision is a plain string such as
+     * `allowed-once`; `$events/result` is the carrier for it.
+     */
+    suspend fun answerWaterfall(clientId: String, eventId: String, value: JsonElement?) {
+        val outcome = buildJsonObject {
+            put("kind", JsonPrimitive("result"))
+            if (value != null) put("value", value)
+        }
+        val args = buildJsonObject {
+            put("clientId", JsonPrimitive(clientId))
+            put("eventId", JsonPrimitive(eventId))
+            put("outcome", outcome)
+        }
+        call("\$events/result", args)
+    }
+
+    /** Decline a waterfall so the Host can fall through to its next listener. */
+    suspend fun delegateWaterfall(clientId: String, eventId: String) {
+        val args = buildJsonObject {
+            put("clientId", JsonPrimitive(clientId))
+            put("eventId", JsonPrimitive(eventId))
+            put("outcome", buildJsonObject { put("kind", JsonPrimitive("next")) })
+        }
+        call("\$events/result", args)
+    }
+
     fun follow(sessionId: String, maxMessages: Int = 50): Flow<MuxFrame> {
         val args = buildJsonObject {
             put(

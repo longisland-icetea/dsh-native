@@ -193,7 +193,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                     )
                 } else {
-                    ConversationView(conversation, holder)
+                    ConversationView(conversation, state, holder)
                 }
             }
         }
@@ -358,7 +358,7 @@ private fun ConnectionDialog(
 }
 
 @Composable
-private fun ConversationView(conversation: Conversation, holder: AppStateHolder) {
+private fun ConversationView(conversation: Conversation, state: AppState, holder: AppStateHolder) {
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
     val total = conversation.items.size
@@ -394,6 +394,12 @@ private fun ConversationView(conversation: Conversation, holder: AppStateHolder)
             }
         }
 
+        // Pending Host calls sit directly above the composer: an unanswered
+        // approval blocks the agent, so it must be impossible to miss.
+        state.pending.filter { it.sessionId == conversation.sessionId }.forEach { interaction ->
+            PendingCard(interaction, holder)
+        }
+
         HorizontalDivider(color = Color(0xFF2A2E38))
         Row(
             Modifier.fillMaxWidth().background(PANEL).padding(8.dp),
@@ -421,6 +427,44 @@ private fun ConversationView(conversation: Conversation, holder: AppStateHolder)
                 enabled = input.isNotBlank(),
             ) {
                 Icon(Icons.Filled.Send, contentDescription = "Send", tint = if (input.isNotBlank()) ACCENT else MUTED)
+            }
+        }
+    }
+}
+
+/** One answerable Host call: tool, reason, and its decisions. */
+@Composable
+private fun PendingCard(interaction: PendingInteraction, holder: AppStateHolder) {
+    Surface(
+        color = Color(0xFF2A2118),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(
+                text = when (interaction.kind) {
+                    "approval" -> "Approval required"
+                    else -> interaction.kind
+                },
+                color = WARN,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            interaction.toolName?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(it, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+            }
+            interaction.reason?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(it, fontSize = 12.sp, color = MUTED)
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                interaction.choices.forEach { choice ->
+                    TextButton(onClick = { holder.answer(interaction, choice.value) }) {
+                        Text(choice.label, fontSize = 13.sp)
+                    }
+                }
             }
         }
     }

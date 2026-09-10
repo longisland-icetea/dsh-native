@@ -72,6 +72,61 @@ data class RpcError(val code: String, val message: String) {
     override fun toString() = "$code: $message"
 }
 
+/**
+ * One item from the forwarded-event stream (`$events`).
+ *
+ * The stream opens with `ready` (which carries the `clientId` every answer must
+ * name), then emits plain notifications and agent-scoped *waterfalls*. A
+ * waterfall is a Host call the client must answer: the listener's return value
+ * travels back through the `$events/result` RPC. Approval prompts and user
+ * questions arrive this way, so ignoring these frames is what leaves a phone
+ * unable to unblock a waiting agent.
+ */
+sealed interface HostEvent {
+    /** Opening frame binding this event generation. */
+    data class Ready(val clientId: String, val home: String?) : HostEvent
+
+    /** Fire-and-forget notification. */
+    data class Notify(val event: String, val args: List<JsonElement>) : HostEvent
+
+    /** A Host call awaiting this client's answer. */
+    data class Waterfall(
+        val event: String,
+        val eventId: String,
+        val agentId: String,
+        val request: JsonObject,
+    ) : HostEvent
+
+    /** The Host withdrew a pending waterfall. */
+    data class Cancelled(val eventId: String) : HostEvent
+}
+
+object HostEventCodec {
+    fun decode(value: JsonElement): HostEvent? {
+        val obj = value as? JsonObject ?: return null
+        return when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+            "ready" -> HostEvent.Ready(
+                clientId = obj["clientId"]?.jsonPrimitive?.contentOrNull ?: return null,
+                home = (obj["host"] as? JsonObject)?.get("home")?.jsonPrimitive?.contentOrNull,
+            )
+            "emit" -> HostEvent.Notify(
+                event = obj["event"]?.jsonPrimitive?.contentOrNull ?: return null,
+                args = (obj["args"] as? JsonArray)?.toList() ?: emptyList(),
+            )
+            "waterfall" -> HostEvent.Waterfall(
+                event = obj["event"]?.jsonPrimitive?.contentOrNull ?: return null,
+                eventId = obj["eventId"]?.jsonPrimitive?.contentOrNull ?: return null,
+                agentId = obj["agentId"]?.jsonPrimitive?.contentOrNull ?: return null,
+                request = obj["request"] as? JsonObject ?: JsonObject(emptyMap()),
+            )
+            "cancel" -> HostEvent.Cancelled(
+                eventId = obj["eventId"]?.jsonPrimitive?.contentOrNull ?: return null,
+            )
+            else -> null
+        }
+    }
+}
+
 /** One validated item from the mux socket. */
 sealed interface MuxFrame {
     val streamId: String

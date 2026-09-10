@@ -7,9 +7,65 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import android.util.Log
+
+/**
+ * A Host call waiting for this client.
+ *
+ * Approval prompts and user questions arrive as waterfalls on `$events`; the
+ * answer is the listener's return value, sent back through `$events/result`.
+ * Until it is answered the agent stays blocked, so these are the only items the
+ * UI must never let a user miss.
+ */
+data class PendingInteraction(
+    val sessionId: String,
+    val eventId: String,
+    val kind: String,
+    val toolName: String?,
+    val callId: String?,
+    val reason: String?,
+    /** Answer values this presentation offers, in display order. */
+    val choices: List<Choice>,
+) {
+    data class Choice(val label: String, val value: String)
+
+    companion object {
+        /** Approval decisions the Host accepts, per the approval client contract. */
+        private val APPROVAL_CHOICES = listOf(
+            Choice("Allow once", "allowed-once"),
+            Choice("Reject", "rejected"),
+        )
+
+        /** Build one from a decoded waterfall, or null when unsupported. */
+        fun from(event: HostEvent.Waterfall): PendingInteraction? {
+            val request = event.request
+            fun field(name: String): String? = (request[name] as? JsonPrimitive)?.contentOrNull
+
+            return when (event.event) {
+                "approval/request" -> PendingInteraction(
+                    sessionId = event.agentId,
+                    eventId = event.eventId,
+                    kind = "approval",
+                    toolName = field("toolName"),
+                    callId = field("callId"),
+                    reason = field("reason"),
+                    choices = APPROVAL_CHOICES,
+                )
+                // Questions and plan reviews are answered with free text or a
+                // selection; wire them once their request shapes are confirmed
+                // rather than guessing a payload the Host would reject.
+                else -> null
+            }
+        }
+    }
+}
 
 /** One row in the transcript. */
 sealed interface TranscriptItem {
@@ -47,6 +103,8 @@ data class AppState(
     val sessionsError: String? = null,
     /** Bytes of the last session/list body, decompressed; a cheap sanity check. */
     val sessionsBytes: Int = 0,
+    /** Host calls blocked on this client, newest last. */
+    val pending: List<PendingInteraction> = emptyList(),
 )
 
 /**
@@ -56,12 +114,17 @@ data class AppState(
  * is reopened and its opening snapshot is merged by seq, which is what makes the
  * client cheap (a 50 KiB snapshot) rather than a full repaint of history.
  */
+private const val TAG = "DshNative"
+
 class AppStateHolder(private val scope: CoroutineScope) {
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state.asStateFlow()
 
     private var client: DshClient? = null
     private var followJob: Job? = null
+    private var eventsJob: Job? = null
+    /** Bound by the `$events` ready frame; every answer must name it. */
+    private var eventClientId: String? = null
 
     fun connect(endpoint: DshEndpoint) {
         disconnect(quiet = true)
@@ -82,12 +145,77 @@ class AppStateHolder(private val scope: CoroutineScope) {
         scope.launch(Dispatchers.IO) {
             created.log.collect { line -> record(line) }
         }
+        openEvents(created)
         refreshSessions()
+    }
+
+    /** Subscribe to forwarded Host events so waterfalls can be answered. */
+    private fun openEvents(active: DshClient) {
+        eventsJob?.cancel()
+        eventsJob = scope.launch(Dispatchers.IO) {
+            // A mux that is not up yet, or that just dropped, must not kill the
+            // process: `callbackFlow` closing with a cause while nothing collects
+            // surfaces as an unhandled exception. Retry until the socket is up.
+            active.events()
+                .retryWhen { cause, _ ->
+                    record("events retry: ${cause.message}")
+                    delay(2_000)
+                    true
+                }
+                .catch { record("events stopped: ${it.message}") }
+                .collect { frame ->
+                when (frame) {
+                    is MuxFrame.Item -> {
+                        when (val host = HostEventCodec.decode(frame.value)) {
+                            is HostEvent.Ready -> {
+                                eventClientId = host.clientId
+                                record("events ready (client ${host.clientId.take(8)})")
+                            }
+                            is HostEvent.Waterfall -> {
+                                val pending = PendingInteraction.from(host)
+                                if (pending == null) {
+                                    // Not something this client can present; let
+                                    // the Host fall through instead of hanging.
+                                    record("declining unsupported waterfall ${host.event}")
+                                    eventClientId?.let { id ->
+                                        runCatching { active.delegateWaterfall(id, host.eventId) }
+                                    }
+                                } else {
+                                    record("pending ${pending.kind}: ${pending.toolName ?: "?"}")
+                                    _state.update { it.copy(pending = it.pending + pending) }
+                                }
+                            }
+                            is HostEvent.Cancelled ->
+                                _state.update { it.copy(pending = it.pending.filterNot { p -> p.eventId == host.eventId }) }
+                            else -> Unit
+                        }
+                    }
+                    is MuxFrame.Failure -> record("events stream failed: ${frame.code}")
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    /** Answer one pending interaction; the value is the waterfall's return value. */
+    fun answer(interaction: PendingInteraction, value: String) {
+        val active = client ?: return
+        val clientId = eventClientId ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.answerWaterfall(clientId, interaction.eventId, JsonPrimitive(value)) }
+                .onSuccess { record("answered ${interaction.kind}: $value") }
+                .onFailure { record("answer failed: ${it.message}") }
+            _state.update { it.copy(pending = it.pending.filterNot { p -> p.eventId == interaction.eventId }) }
+        }
     }
 
     fun disconnect(quiet: Boolean = false) {
         followJob?.cancel()
         followJob = null
+        eventsJob?.cancel()
+        eventsJob = null
+        eventClientId = null
+        _state.update { it.copy(pending = emptyList()) }
         client?.stop()
         client = null
         _state.update {
@@ -115,8 +243,15 @@ class AppStateHolder(private val scope: CoroutineScope) {
         }
     }
 
-    /** Append one line to the in-app log the drawer shows. */
+    /**
+     * Append one line to the in-app log and to logcat.
+     *
+     * The drawer renders the log at the end of the session list, which is
+     * unreachable once a harness has dozens of sessions; logcat is what makes
+     * these events observable while the UI is still being built.
+     */
     private fun record(line: String) {
+        Log.i(TAG, line)
         _state.update { it.copy(log = (listOf(line) + it.log).take(80)) }
     }
 
@@ -144,10 +279,18 @@ class AppStateHolder(private val scope: CoroutineScope) {
         followJob?.cancel()
         followJob = scope.launch(Dispatchers.IO) {
             active.follow(sessionId)
+                .retryWhen { cause, _ ->
+                    _state.update { current ->
+                        val live = current.conversation ?: return@update current
+                        current.copy(conversation = live.copy(error = cause.message))
+                    }
+                    delay(2_000)
+                    true
+                }
                 .catch { error ->
                     _state.update { current ->
-                        val conversation = current.conversation ?: return@update current
-                        current.copy(conversation = conversation.copy(error = error.message))
+                        val live = current.conversation ?: return@update current
+                        current.copy(conversation = live.copy(error = error.message))
                     }
                 }
                 .collect { frame -> reduce(sessionId, title, frame) }
