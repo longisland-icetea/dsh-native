@@ -21,6 +21,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Call
@@ -106,8 +108,12 @@ class DshClient(
 
     private var muxJob: Job? = null
 
+    @Volatile
+    private var socketCrashGuardInstalled = false
+
     fun start() {
         if (muxJob != null) return
+        installSocketCrashGuard()
         // Dispatchers.IO, not the caller's scope: the caller passes a
         // lifecycleScope, so launching here put the WebSocket connect and its
         // reader loop on the main thread, where Android forbids socket I/O, and
@@ -211,6 +217,35 @@ class DshClient(
         cont.invokeOnCancellation {
             runCatching { socket.close(1000, "cancelled") }
             finish(kotlinx.coroutines.CancellationException("socket cancelled"))
+        }
+    }
+
+    /**
+     * Keep a dropped connection from killing a foreground app.
+     *
+     * A phone loses its network constantly -- a lift, a screen lock, a router
+     * reboot, the host restarting. Every one of those surfaces here as a
+     * [java.net.SocketException] on whichever worker thread happened to be
+     * reading the socket, and an uncaught one kills the process even though the
+     * mux loop has already logged the drop and is about to reconnect.
+     *
+     * The filter is the exception class, not the thread: an [IOException] from a
+     * socket is exactly the failure this client exists to ride out. Anything
+     * else -- a `NullPointerException`, an `IllegalStateException`, a bad cast --
+     * still reaches the default handler and crashes loudly, because those are
+     * bugs and hiding them would cost more than the crash.
+     */
+    private fun installSocketCrashGuard() {
+        if (socketCrashGuardInstalled) return
+        socketCrashGuardInstalled = true
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            val transientNetwork = error is IOException || error.cause is IOException
+            if (transientNetwork) {
+                record("ignored socket failure on ${thread.name}: ${error.message ?: error::class.simpleName}")
+            } else {
+                previous?.uncaughtException(thread, error)
+            }
         }
     }
 
@@ -357,6 +392,47 @@ class DshClient(
     fun workspaces(): Flow<MuxFrame> = openStream("workspace/follow", buildJsonObject { })
 
     /** Every routable provider, its models, and their reasoning efforts. */
+    /**
+     * Read one text file through the Host, for the deliverable preview.
+     *
+     * The argument names come from the endpoint descriptor: the scope is
+     * `workspaceFileScopeId` (not `workspaceFileScope`, which the wire rejects),
+     * and `range` is required even though it may be empty -- omitting it fails
+     * with `gateway/arguments-invalid`.
+     */
+    suspend fun readWorkspaceFile(sessionId: String, path: String): String {
+        val args = buildJsonObject {
+            put("workspaceFileScopeId", sessionId)
+            put("path", path)
+            put("range", buildJsonObject { })
+        }
+        val value = call("workspaceFiles/read", args)
+        val obj = value as? JsonObject ?: throw DshException("read: unexpected result")
+        return obj["text"]?.jsonPrimitive?.contentOrNull
+            ?: throw DshException("read: no text in result")
+    }
+
+    /**
+     * Read one file's raw bytes, base64 over the wire.
+     *
+     * `read` refuses anything that is not UTF-8 -- which is correct for a text
+     * endpoint and useless for a deliverable, since the deliverables worth
+     * looking at are frequently figures. This path has no decoding and no
+     * rejection, so an image can be rendered from it.
+     */
+    suspend fun readWorkspaceBytes(sessionId: String, path: String): ByteArray {
+        val args = buildJsonObject {
+            put("workspaceFileScopeId", sessionId)
+            put("path", path)
+            put("range", buildJsonObject { })
+        }
+        val value = call("workspaceFiles/readBytes", args)
+        val obj = value as? JsonObject ?: throw DshException("readBytes: unexpected result")
+        val data = obj["data"]?.jsonPrimitive?.contentOrNull
+            ?: throw DshException("readBytes: no data in result")
+        return android.util.Base64.decode(data, android.util.Base64.DEFAULT)
+    }
+
     suspend fun modelCatalog(): ModelCatalog {
         // The descriptor declares no parameters; sending a `request` field is
         // rejected with gateway/arguments-invalid.

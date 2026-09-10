@@ -4,8 +4,10 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,11 +27,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -59,14 +62,21 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -105,6 +115,228 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** What the top-bar chip says: the model in force, with its effort when set. */
+private fun selectionLabel(selection: ModelSelection?): String {
+    val model = selection?.model?.takeIf { it.isNotBlank() } ?: return "model: default"
+    val effort = selection.reasoningEffort?.takeIf { it.isNotBlank() }
+    return if (effort == null) model else "$model · $effort"
+}
+
+/**
+ * Model and reasoning-effort picker.
+ *
+ * The catalog is a provider -> model -> effort tree, so the dialog walks it in
+ * that order: choosing a model with several efforts shows them as chips rather
+ * than hiding the choice behind a second screen. `/compact` sits here because
+ * both are mid-conversation knobs.
+ */
+@Composable
+private fun ModelPickerDialog(
+    state: AppState,
+    onDismiss: () -> Unit,
+    onPick: (String, String, String?) -> Unit,
+    onCompact: () -> Unit,
+) {
+    val catalog = state.catalog
+    val current = state.selection
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Model", fontSize = 16.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (catalog == null) {
+                    Text("loading catalog…", color = MUTED, fontSize = 12.sp)
+                }
+                catalog?.groups?.forEach { group ->
+                    Text(
+                        text = group.name ?: group.id,
+                        color = MUTED,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp),
+                    )
+                    group.models.forEach { model ->
+                        val selected = current?.provider == group.id && current.model == model.id
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) { onPick(group.id, model.id, model.reasoning?.defaultEffort) }
+                                .padding(vertical = 4.dp),
+                        ) {
+                            Text(
+                                text = (if (selected) "● " else "○ ") + (model.name ?: model.id),
+                                color = if (selected) ACCENT else Color(0xFFB9C1CE),
+                                fontSize = 13.sp,
+                            )
+                            // Efforts appear only for the selected model: showing
+                            // every model's efforts at once is a wall of text.
+                            if (selected) {
+                                val efforts = model.reasoning?.efforts.orEmpty()
+                                if (efforts.isNotEmpty()) {
+                                    Row(
+                                        Modifier.padding(start = 14.dp, top = 2.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        efforts.forEach { effort ->
+                                            val on = current?.reasoningEffort == effort.id
+                                            Text(
+                                                text = effort.name ?: effort.id,
+                                                color = if (on) INK else MUTED,
+                                                fontSize = 11.sp,
+                                                modifier = Modifier
+                                                    .background(
+                                                        if (on) ACCENT else Color(0xFF23272F),
+                                                        RoundedCornerShape(6.dp),
+                                                    )
+                                                    .clickable(
+                                                        interactionSource = remember { MutableInteractionSource() },
+                                                        indication = null,
+                                                    ) { onPick(group.id, model.id, effort.id) }
+                                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider(Modifier.padding(top = 12.dp, bottom = 6.dp))
+                Text(
+                    text = "Compact conversation",
+                    color = Color(0xFFB9C1CE),
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { onCompact() }
+                        .padding(vertical = 4.dp),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        containerColor = PANEL,
+    )
+}
+
+/** A tap-opened preview of one deliverable, read through the Host. */
+@Composable
+private fun FilePreviewDialog(preview: FilePreview?, loading: String?, onDismiss: () -> Unit) {
+    if (preview == null && loading == null) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(
+                    text = preview?.path?.substringAfterLast('/')
+                        ?: loading?.substringAfterLast('/').orEmpty(),
+                    fontSize = 15.sp,
+                )
+                Text(
+                    text = preview?.path ?: loading.orEmpty(),
+                    color = MUTED,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        },
+        text = {
+            // The read is usually a fraction of a second, but a large file over
+            // Wi-Fi is not: the sheet has to say it is working, and the transcript
+            // row that used to carry this is behind the dialog.
+            if (preview == null) {
+                Text("reading…", color = MUTED, fontSize = 12.sp)
+                return@AlertDialog
+            }
+            when (preview) {
+                is FilePreview.Failed -> Text(preview.reason, color = WARN, fontSize = 12.sp)
+                is FilePreview.Bitmap -> ImagePreview(preview)
+                is FilePreview.Text -> {
+                    val body = preview.body
+                    if (body.isEmpty()) {
+                        Text("(empty file)", color = MUTED, fontSize = 12.sp)
+                        return@AlertDialog
+                    }
+                    Column(
+                        Modifier
+                            .verticalScroll(rememberScrollState())
+                            .horizontalScroll(rememberScrollState()),
+                    ) {
+                        // One selectable block: a preview is for reading and
+                        // copying, and markdown rendering would hide the source the
+                        // model wrote.
+                        SelectionContainer {
+                            Text(body, color = Color(0xFFB9C1CE), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        containerColor = PANEL,
+    )
+}
+
+/**
+ * A figure, decoded once and shown scaled to the sheet's width.
+ *
+ * Decoding happens off the composition (`produceState` on the IO dispatcher)
+ * because a 400 KB PNG is a visible stall on the main thread, and a deliverable
+ * of several megabytes is a dropped frame the user sees as a freeze.
+ *
+ * The bitmap is capped: a phone has a fraction of a desktop's heap, and an
+ * oversized decode fails with an OutOfMemoryError that would take the process
+ * with it. Beyond the cap the sheet reports the size instead of trying.
+ */
+@Composable
+private fun ImagePreview(preview: FilePreview.Bitmap) {
+    val maxBytes = 12L * 1024 * 1024
+    if (preview.mime == null || preview.bytes.size.toLong() > maxBytes) {
+        Text(
+            text = buildString {
+                append("Not drawn here: ")
+                append(preview.mime ?: "unrecognised image type")
+                append(", ")
+                append("%.1f MB".format(preview.bytes.size / 1024.0 / 1024.0))
+                append(". Open it on the host at the path above.")
+            },
+            color = MUTED,
+            fontSize = 12.sp,
+        )
+        return
+    }
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, preview.path) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                android.graphics.BitmapFactory.decodeByteArray(preview.bytes, 0, preview.bytes.size)
+            }.getOrNull()
+        }
+    }
+    val image = bitmap
+    when {
+        image == null -> Text("The image could not be decoded.", color = WARN, fontSize = 12.sp)
+        else -> Column(Modifier.verticalScroll(rememberScrollState())) {
+            androidx.compose.foundation.Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = preview.path.substringAfterLast('/'),
+                modifier = Modifier.fillMaxWidth(),
+                contentScale = ContentScale.Fit,
+            )
+            Text(
+                text = "${image.width}×${image.height} · %.0f KB".format(preview.bytes.size / 1024.0),
+                color = MUTED,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+    }
+}
+
 /** Last-used endpoint, so a restart does not ask again. */
 private object EndpointStore {
     private const val FILE = "dsh_native"
@@ -125,6 +357,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var showSettings by remember { mutableStateOf(false) }
+    var showModels by remember { mutableStateOf(false) }
     val saved = remember { EndpointStore.load(context) }
     // A delegated property cannot be smart-cast, so read it once per recomposition.
     val endpoint = state.endpoint
@@ -179,33 +412,42 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                     fontWeight = FontWeight.SemiBold,
                                 )
                             }
-                            Text(
-                                text = endpoint?.let { point ->
-                                    if (state.connected) "connected · ${point.host}"
-                                    else "reconnecting · ${point.host}"
-                                } ?: "not configured",
-                                fontSize = 11.sp,
-                                color = if (state.connected) MUTED else WARN,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = endpoint?.let { point ->
+                                        if (state.connected) "connected · ${point.host}"
+                                        else "reconnecting · ${point.host}"
+                                    } ?: "not configured",
+                                    fontSize = 11.sp,
+                                    color = if (state.connected) MUTED else WARN,
+                                )
+                                // Model and effort are the two knobs worth reaching
+                                // mid-conversation; both live behind this chip rather
+                                // than in the settings dialog, which is about the
+                                // connection.
+                                if (state.conversation != null) {
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = selectionLabel(state.selection),
+                                        color = ACCENT,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        modifier = Modifier
+                                            .clickable(
+                                                interactionSource = remember { MutableInteractionSource() },
+                                                indication = null,
+                                            ) { showModels = true }
+                                            .padding(horizontal = 2.dp, vertical = 1.dp),
+                                    )
+                                }
+                            }
                         }
                     },
                     actions = {
                         if (state.pending.isNotEmpty()) {
                             IconButton(onClick = {
                                 // Jump to the session that is waiting, if it is not
-                                // the one already open.
-                                val waiting = state.pending.first()
-                                if (state.conversation?.sessionId != waiting.sessionId) {
-                                    state.sessions.firstOrNull { it.sessionId == waiting.sessionId }
-                                        ?.let(holder::openSession)
-                                }
-                            }) {
-                                Icon(Icons.Filled.Notifications, contentDescription = "Waiting", tint = WARN)
-                            }
-                        }
-                        if (state.pending.isNotEmpty()) {
-                            IconButton(onClick = {
-                                // Jump to the session that is waiting when it is not
                                 // the one already open.
                                 val waiting = state.pending.first()
                                 if (state.conversation?.sessionId != waiting.sessionId) {
@@ -241,6 +483,25 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                 }
             }
         }
+    }
+
+    if (state.preview != null || state.previewLoading != null) {
+        FilePreviewDialog(state.preview, state.previewLoading, holder::dismissPreview)
+    }
+
+    if (showModels) {
+        ModelPickerDialog(
+            state = state,
+            onDismiss = { showModels = false },
+            onPick = { provider, model, effort ->
+                holder.selectModel(provider, model, effort)
+                showModels = false
+            },
+            onCompact = {
+                holder.runCommand("/compact")
+                showModels = false
+            },
+        )
     }
 
     if (showSettings) {
@@ -470,7 +731,7 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                     }
                 }
             }
-            items(conversation.items, key = { it.key }) { item -> TranscriptRow(item) }
+            items(conversation.items, key = { it.key }) { item -> TranscriptRow(item, onOpenFile = holder::previewFile) }
             if (liveText.isNotEmpty()) {
                 item(key = "live") { AssistantBubble(liveText, streaming = true) }
             }
@@ -702,7 +963,7 @@ private fun QuestionBody(interaction: PendingInteraction, holder: AppStateHolder
 }
 
 @Composable
-private fun TranscriptRow(item: TranscriptItem) {
+private fun TranscriptRow(item: TranscriptItem, onOpenFile: (String) -> Unit = {}) {
     when (item) {
         is TranscriptItem.User -> UserBubble(item.text)
         is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming)
@@ -712,8 +973,116 @@ private fun TranscriptRow(item: TranscriptItem) {
         // exhaustive without ever rendering a bare result line.
         is TranscriptItem.ToolResultRow -> Unit
         is TranscriptItem.Note -> Text(item.text, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp))
+        is TranscriptItem.Notice -> NoticeCard(item)
+        is TranscriptItem.Todo -> TodoCard(item.todos)
+        is TranscriptItem.Deliverables -> DeliverablesCard(item, onOpenFile)
     }
 }
+
+/**
+ * One prose block, styled by the kind the parser assigned.
+ *
+ * Headings and quotes get their emphasis from size and a left rule rather than
+ * from `#` and `>` markers: the markers are syntax, and a phone reading a plan
+ * wants the hierarchy, not the source.
+ */
+@Composable
+private fun ProseBlock(block: MarkdownBlock.Prose) {
+    val body = block.lines.joinToString("\n").trim('\n')
+    if (body.isEmpty()) return
+    val (size, weight, lineHeight) = when (block.kind) {
+        ProseKind.Heading1 -> Triple(19.sp, FontWeight.SemiBold, 25.sp)
+        ProseKind.Heading2 -> Triple(17.sp, FontWeight.SemiBold, 23.sp)
+        ProseKind.Heading3 -> Triple(15.sp, FontWeight.SemiBold, 21.sp)
+        ProseKind.Bullet, ProseKind.Ordered -> Triple(14.sp, FontWeight.Normal, 21.sp)
+        else -> Triple(14.sp, FontWeight.Normal, 21.sp)
+    }
+    val content: @Composable () -> Unit = {
+        SelectionContainer {
+            Text(
+                text = SimpleMarkdown.inline(body, ACCENT, Color(0xFF8FD6FF)),
+                fontSize = size,
+                lineHeight = lineHeight,
+                fontWeight = weight,
+                color = if (block.kind == ProseKind.Quote) MUTED else Color.Unspecified,
+                // A bullet list is indented as a block; the marker is in the text,
+                // so the indent is all the layout has to add.
+                modifier = if (block.kind == ProseKind.Bullet || block.kind == ProseKind.Ordered) {
+                    Modifier.padding(start = 10.dp)
+                } else {
+                    Modifier
+                },
+            )
+        }
+    }
+    when (block.kind) {
+        // A quote is a left rule plus an indent. The rule is sized by the text
+        // rather than stretched: `fillMaxHeight` needs a bounded parent, and the
+        // transcript's Column is unbounded by design.
+        ProseKind.Quote -> Surface(
+            color = Color(0xFF191D24),
+            shape = RoundedCornerShape(4.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(Modifier.padding(start = 8.dp, top = 4.dp, bottom = 4.dp, end = 6.dp)) {
+                Text("▎", color = Color(0xFF3A4150), fontSize = 14.sp)
+                Spacer(Modifier.width(6.dp))
+                Column { content() }
+            }
+        }
+        else -> content()
+    }
+}
+
+/**
+ * A pipe table, laid out with real columns and horizontal scroll.
+ *
+ * Wrapping a table into prose loses the alignment that makes it a table, so the
+ * whole thing scrolls sideways instead. Column weights come from the header
+ * widths, which is what makes a narrow first column stay narrow.
+ */
+@Composable
+private fun TableBlock(table: MarkdownBlock.Table) {
+    val columns = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
+    if (columns == 0) return
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .background(Color(0xFF171A20), RoundedCornerShape(6.dp))
+            .padding(vertical = 4.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
+            table.header.forEach { cell ->
+                Text(
+                    text = SimpleMarkdown.inline(cell, ACCENT, Color(0xFF8FD6FF)),
+                    color = ACCENT,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.width(columnWidth(cell)),
+                )
+            }
+        }
+        HorizontalDivider(color = Color(0xFF2A2F38))
+        table.rows.forEach { row ->
+            Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
+                for (index in 0 until columns) {
+                    Text(
+                        text = SimpleMarkdown.inline(row.getOrElse(index) { "" }, ACCENT, Color(0xFF8FD6FF)),
+                        color = Color(0xFFB9C1CE),
+                        fontSize = 12.sp,
+                        modifier = Modifier.width(columnWidth(row.getOrElse(index) { "" })),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Column width from content length, clamped so one long cell cannot eat the row. */
+private fun columnWidth(cell: String) =
+    (cell.length.coerceIn(6, 34) * 7).dp
 
 @Composable
 private fun UserBubble(text: String) {
@@ -741,19 +1110,13 @@ private fun AssistantBubble(text: String, streaming: Boolean) {
             val blocks = remember(text) { SimpleMarkdown.parse(text) }
             blocks.forEach { block ->
                 when (block) {
-                    is MarkdownBlock.Prose -> {
-                        val body = block.lines.joinToString("\n").trim('\n')
-                        if (body.isNotEmpty()) {
-                            SelectionContainer {
-                                Text(
-                                    text = SimpleMarkdown.inline(body, ACCENT),
-                                    fontSize = 14.sp,
-                                    lineHeight = 21.sp,
-                                )
-                            }
-                        }
-                    }
+                    is MarkdownBlock.Prose -> ProseBlock(block)
                     is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
+                    is MarkdownBlock.Table -> TableBlock(block)
+                    MarkdownBlock.Rule -> HorizontalDivider(
+                        Modifier.padding(vertical = 6.dp),
+                        color = Color(0xFF2A2F38),
+                    )
                 }
             }
             if (streaming) {
@@ -826,7 +1189,10 @@ private fun ToolCard(call: TranscriptItem.ToolCall) {
             .fillMaxWidth()
             .padding(vertical = 2.dp)
             .background(Color(0xFF1A1D23), RoundedCornerShape(8.dp))
-            .clickable { expanded = !expanded }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { expanded = !expanded }
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -875,6 +1241,166 @@ private fun ToolCard(call: TranscriptItem.ToolCall) {
                         lineHeight = 15.sp,
                         fontFamily = FontFamily.Monospace,
                     )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A harness notice, laid out like a tool card.
+ *
+ * Background-job results and other plugin messages are the harness talking about
+ * its own work; the tool-card shape marks them as machinery instead of letting
+ * them read as a reply.
+ */
+@Composable
+private fun NoticeCard(item: TranscriptItem.Notice) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .background(Color(0xFF1A1D23), RoundedCornerShape(8.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { expanded = !expanded }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (expanded) "v" else ">",
+                color = MUTED,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.width(12.dp),
+            )
+            Text(
+                text = item.label,
+                color = ACCENT,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+            )
+            // Only a scoped plugin name carries information the short label lost.
+            item.plugin?.takeIf { it.contains('/') }?.let {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = it,
+                    color = Color(0xFF5D6577),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        val body = item.body?.trim()
+        if (!body.isNullOrEmpty()) {
+            Text(
+                text = if (expanded) body else body.replace("\n", " ").take(120),
+                color = Color(0xFFB9C1CE),
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = if (expanded) Int.MAX_VALUE else 1,
+                modifier = Modifier.padding(start = 12.dp, top = 3.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The model's plan, as the newest `todo/write` left it.
+ *
+ * A todo list is state, not an event: only the latest write matters, which is why
+ * this renders the list it was handed rather than accumulating rows.
+ */
+@Composable
+private fun TodoCard(todos: List<EventPayload.Todo>) {
+    val done = todos.count { it.status == "completed" }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .background(Color(0xFF1A1D23), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("todos", color = ACCENT, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
+            Text("$done/${todos.size}", color = MUTED, fontSize = 10.sp)
+        }
+        todos.forEach { todo ->
+            Row(Modifier.padding(start = 2.dp, top = 3.dp)) {
+                Text(
+                    text = when (todo.status) {
+                        "completed" -> "✓"
+                        "in_progress" -> "▶"
+                        else -> "○"
+                    },
+                    color = when (todo.status) {
+                        "completed" -> Color(0xFF6FBF73)
+                        "in_progress" -> ACCENT
+                        else -> MUTED
+                    },
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.width(16.dp),
+                )
+                Text(
+                    text = todo.content,
+                    color = if (todo.status == "completed") Color(0xFF6C7484) else Color(0xFFB9C1CE),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    // Struck-through would be prettier, but a completed item still
+                    // has to be readable: the dim colour carries it.
+                    textDecoration = if (todo.status == "completed") TextDecoration.LineThrough else null,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Files a turn declared, each opening the preview sheet.
+ *
+ * `present` is how the model says "this is the deliverable"; a path on its own
+ * would be buried in a tool card's output.
+ */
+@Composable
+private fun DeliverablesCard(item: TranscriptItem.Deliverables, onOpen: (String) -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .background(Color(0xFF1C2230), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text("deliverables", color = ACCENT, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)
+        item.files.forEach { file ->
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onOpen(file.path) },
+            ) {
+                Text(
+                    text = file.path.substringAfterLast('/'),
+                    color = Color(0xFF9CC4FF),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    textDecoration = TextDecoration.Underline,
+                )
+                file.description?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, color = Color(0xFF8A93A5), fontSize = 11.sp, lineHeight = 14.sp)
                 }
             }
         }

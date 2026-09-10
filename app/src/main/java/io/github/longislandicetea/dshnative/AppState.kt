@@ -120,6 +120,18 @@ data class PendingInteraction(
 }
 
 /** One row in the transcript. */
+/**
+ * The card header for a notice: the plugin's short name.
+ *
+ * `source.plugin` is a package path for built-ins (`tool-jobs`) but a scope path
+ * for others (`@deepseek-ai/dsh-system-prompt`); the trailing segment is the part
+ * a reader recognises.
+ */
+private fun noticeLabel(plugin: String?): String {
+    val name = plugin?.substringAfterLast('/')?.removePrefix("@")?.removePrefix("dsh-")
+    return name?.takeIf { it.isNotBlank() } ?: "notice"
+}
+
 sealed interface TranscriptItem {
     val key: String
 
@@ -154,6 +166,38 @@ sealed interface TranscriptItem {
     }
 
     /** A result waiting to be folded into its call. */
+    /**
+     * A harness notice, shown as a card in the tool-call style.
+     *
+     * Background jobs arrive as plugin-sourced user messages; rendering them as
+     * chat text made the harness look like the human.
+     */
+    data class Notice(
+        override val key: String,
+        val label: String,
+        val plugin: String?,
+        val body: String?,
+    ) : TranscriptItem
+
+    /** The model's plan, as the newest `todo/write` in the window left it. */
+    data class Todo(
+        override val key: String,
+        val todos: List<EventPayload.Todo>,
+    ) : TranscriptItem
+
+    /**
+     * Files a turn declared as its output.
+     *
+     * [workspaceRoot] is carried down from the session's Workspace so a relative
+     * path can be resolved for the preview; the Host reads an absolute path or
+     * one relative to that root, and nothing else.
+     */
+    data class Deliverables(
+        override val key: String,
+        val files: List<EventPayload.DeliveredFile>,
+        val workspaceRoot: String?,
+    ) : TranscriptItem
+
     data class ToolResultRow(
         override val key: String,
         val toolCallId: String?,
@@ -161,6 +205,40 @@ sealed interface TranscriptItem {
         val failed: Boolean,
     ) : TranscriptItem
     data class Note(override val key: String, val text: String) : TranscriptItem
+}
+
+/**
+ * What the preview sheet is showing for one file.
+ *
+ * A failed read is a first-class outcome, not an exception: a path the Host
+ * cannot resolve is a normal answer, and the sheet says so instead of leaving the
+ * tap with no visible effect.
+ */
+sealed interface FilePreview {
+    val path: String
+
+    /** UTF-8 text, shown as a selectable monospace block. */
+    data class Text(override val path: String, val body: String) : FilePreview
+
+    /**
+     * An image, decoded from the Host's raw bytes.
+     *
+     * `mime` decides whether it can be drawn; a file that is neither text nor a
+     * known image ends up here with a null `mime` and the sheet reports its size
+     * instead of pretending to render it.
+     */
+    data class Bitmap(
+        override val path: String,
+        val bytes: ByteArray,
+        val mime: String?,
+        val totalBytes: Long?,
+    ) : FilePreview {
+        override fun equals(other: Any?) = this === other
+        override fun hashCode() = System.identityHashCode(this)
+    }
+
+    /** The read failed; [reason] is written for a reader, not a developer. */
+    data class Failed(override val path: String, val reason: String) : FilePreview
 }
 
 data class Conversation(
@@ -175,6 +253,12 @@ data class Conversation(
     val running: Boolean = false,
     /** Live assistant text for the attempt in flight. */
     val liveText: String = "",
+    /**
+     * The session's working directory, used to resolve a deliverable the model
+     * named relatively. The Host resolves reads against this root, so a preview
+     * has to resolve them the same way.
+     */
+    val workspaceRoot: String? = null,
     val error: String? = null,
 )
 
@@ -280,6 +364,16 @@ data class AppState(
     val catalog: ModelCatalog? = null,
     /** Provider/model/effort currently in force for the open conversation. */
     val selection: ModelSelection? = null,
+    /**
+     * The deliverable the preview sheet is showing.
+     *
+     * Null means no sheet. A [Conversation] is not the right home for this: the
+     * sheet is a property of the reader's attention, not of the transcript, and
+     * it must survive a transcript re-snapshot without reopening.
+     */
+    val preview: FilePreview? = null,
+    /** Path whose read is in flight, so the sheet can show that rather than a blank. */
+    val previewLoading: String? = null,
 ) {
     /**
      * Sessions the drawer actually shows.
@@ -663,12 +757,96 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     sessionId = session.sessionId,
                     title = session.title,
                     running = session.running,
+                    workspaceRoot = session.cwd,
                 ),
                 selection = selection,
             )
         }
         openFollow(session.sessionId, session.title)
         loadCatalog()
+    }
+
+    /**
+     * Read a deliverable back for the preview sheet.
+     *
+     * The read is host-side over `workspaceFiles/read` because that is the only
+     * path that can see a file the harness wrote outside the app sandbox. A
+     * relative path is resolved against the session's workspace root, which is
+     * what the Host does with it.
+     */
+    fun previewFile(path: String) {
+        val active = client
+        val session = _state.value.conversation
+        val root = session?.workspaceRoot?.trimEnd('/')
+        val resolved = if (path.startsWith("/") || root == null) path else "$root/$path"
+        if (active == null || session == null) {
+            _state.update { it.copy(preview = FilePreview.Failed(resolved, "Not connected.")) }
+            return
+        }
+        _state.update { it.copy(previewLoading = resolved) }
+        scope.launch(Dispatchers.IO) {
+            val preview = readPreview(active, session.sessionId, resolved)
+            _state.update { it.copy(preview = preview, previewLoading = null) }
+        }
+    }
+
+    /**
+     * Read a deliverable, text first and bytes second.
+     *
+     * The text endpoint is the cheap path and refuses anything non-UTF-8; when it
+     * refuses, the bytes endpoint answers the question the reader actually asked,
+     * which for a figure is "show me the picture".
+     */
+    private suspend fun readPreview(active: DshClient, sessionId: String, path: String): FilePreview {
+        val asText = runCatching { active.readWorkspaceFile(sessionId, path) }
+        asText.getOrNull()?.let { return FilePreview.Text(path, it) }
+        val textFailure = asText.exceptionOrNull()?.message.orEmpty()
+        if (!textFailure.contains("not-text")) {
+            return FilePreview.Failed(path, explainReadFailure(textFailure))
+        }
+        val asBytes = runCatching { active.readWorkspaceBytes(sessionId, path) }
+        val bytes = asBytes.getOrNull()
+            ?: return FilePreview.Failed(path, explainReadFailure(asBytes.exceptionOrNull()?.message.orEmpty()))
+        return FilePreview.Bitmap(path, bytes, imageMimeOf(bytes), bytes.size.toLong())
+    }
+
+    /**
+     * The image type of a byte array, or null when it is not one this can draw.
+     *
+     * Magic bytes rather than the extension: a deliverable named `.png` that is
+     * really a PDF would otherwise be handed to the bitmap decoder, fail, and
+     * report a decode error instead of the truth.
+     */
+    private fun imageMimeOf(bytes: ByteArray): String? = when {
+        bytes.size >= 8 && bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte() &&
+            bytes[2] == 'N'.code.toByte() && bytes[3] == 'G'.code.toByte() -> "image/png"
+        bytes.size >= 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() &&
+            bytes[2] == 0xFF.toByte() -> "image/jpeg"
+        bytes.size >= 6 && bytes[0] == 'G'.code.toByte() && bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte() -> "image/gif"
+        bytes.size >= 12 && bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() &&
+            bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte() -> "image/webp"
+        else -> null
+    }
+
+    /**
+     * Turn a Host read refusal into something a reader can act on.
+     *
+     * The wire error is precise but written for a developer: `workspace-file/
+     * not-text` says nothing about what to do, and this sheet is often the first
+     * thing that tells someone the deliverable is a figure rather than a
+     * document.
+     */
+    private fun explainReadFailure(message: String): String = when {
+        message.contains("not-text") ->
+            "This file is neither text nor an image this build can draw, so there is nothing to show here."
+        message.contains("not-found") ->
+            "The Host cannot find this path. It may have been moved or deleted since the turn that produced it."
+        else -> message
+    }
+
+    fun dismissPreview() {
+        _state.update { it.copy(preview = null, previewLoading = null) }
     }
 
     fun closeSession() {
@@ -728,7 +906,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // The snapshot is the newest window, not a delta: rebuild by seq so a
             // reconnect cannot duplicate or reorder what is already on screen.
             val merged = pairToolResults(
-                (conversation.items + frame.records.mapNotNull(::toItem))
+                (conversation.items + frame.records.mapNotNull { toItem(it, conversation.workspaceRoot) })
                     .associateBy { it.key }
                     .values
                     .sortedBy(::seqOf),
@@ -746,7 +924,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
 
         is FollowFrame.Event -> conversation.copy(
             items = pairToolResults(
-                (conversation.items + listOfNotNull(toItem(frame.event))).distinctBy { it.key },
+                (conversation.items + listOfNotNull(toItem(frame.event, conversation.workspaceRoot)))
+                    .distinctBy { it.key },
             ),
             lastSeq = maxOf(conversation.lastSeq, frame.event.seq),
             running = when (frame.event.type) {
@@ -767,27 +946,65 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private fun seqOf(item: TranscriptItem): Long =
         item.key.removePrefix("seq-").toLongOrNull() ?: Long.MAX_VALUE
 
-    private fun toItem(event: SessionEvent): TranscriptItem? {
+    /**
+     * Map one durable event to a transcript row, or to null when the event is
+     * machinery the reader does not need ([docs/event-coverage.md] has the full
+     * table and the reason for each choice).
+     */
+    private fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
         val key = "seq-${event.seq}"
         val text = event.text
         return when (event.type) {
             "user/message" -> when {
                 // A plugin-sourced user message is the harness talking to
                 // itself; only a human prompt is rendered as one.
-                EventPayload.isNotice(event) -> TranscriptItem.Note(key, text?.take(200) ?: "notice")
+                // A background-job result is the harness reporting a job, so it
+                // is presented like a tool call rather than as chat text.
+                EventPayload.isNotice(event) -> {
+                    val plugin = EventPayload.noticePlugin(event)
+                    TranscriptItem.Notice(
+                        key = key,
+                        label = noticeLabel(plugin),
+                        plugin = plugin,
+                        body = EventPayload.noticeSummary(event) ?: text,
+                    )
+                }
                 text != null -> TranscriptItem.User(key, text)
                 else -> null
             }
             // An assistant message may carry only tool calls and no prose, which
             // is a normal step rather than a renderable reply.
+            // A message with no text block carries only reasoning or tool calls,
+            // which are steps rather than a reply. Rendering nothing is correct;
+            // falling through printed the literal event name.
             "assistant/message" -> text?.let { TranscriptItem.Assistant(key, it, streaming = false) }
-                ?: TranscriptItem.Activity(key, event.label, event.detail)
-            "turn/end" -> TranscriptItem.Note(key, "turn finished")
+            // A turn that failed says so; a clean one is implied by the next
+            // message and a row per turn would just be noise.
+            "turn/end" -> EventPayload.turnOutcome(event)?.let { TranscriptItem.Note(key, it) }
+            "todo/write" -> EventPayload.todoList(event)?.let { TranscriptItem.Todo(key, it) }
+            "deliverables/presented" -> EventPayload.deliveredFiles(event)?.let {
+                TranscriptItem.Deliverables(key, it, workspaceRoot)
+            }
+            // Model switches and session settings are facts about the session
+            // rather than turns: one compact line each, no card.
+            "model/selection" -> EventPayload.modelChoice(event)?.let { choice ->
+                val effort = choice.effort?.let { " · $it" } ?: ""
+                TranscriptItem.Note(key, "model: ${choice.provider}/${choice.model}$effort")
+            }
+            "permission/preset", "sandbox/mode", "approval/policy",
+            "compaction/start", "compaction/end",
+            -> EventPayload.settingChange(event)?.let { (name, value) ->
+                TranscriptItem.Note(key, "$name: $value")
+            }
             // Rendering every step boundary and inbox splice buries the
             // conversation: one sampled turn produced hundreds of such rows
             // against 41 assistant messages.
             "turn/start", "step/start", "step/end", "agent/inbox/spliced",
             "request/header", "request/context",
+            // Raw stream chunks: the message they assemble into is rendered, and
+            // the seed marker carries nothing.
+            "assistant/attempt", "session/end-seed", "session/title",
+            "session/title-llm-request", "compaction/summary", "compaction/prune",
             -> null
             "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
                 TranscriptItem.ToolCall(
@@ -870,7 +1087,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 _state.update { current ->
                     val live = current.conversation ?: return@update current
                     val merged = pairToolResults(
-                        (live.items + events.mapNotNull(::toItem))
+                        (live.items + events.mapNotNull { toItem(it, live.workspaceRoot) })
                             .associateBy { it.key }
                             .values
                             .sortedBy(::seqOf),

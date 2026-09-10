@@ -578,6 +578,124 @@ object EventPayload {
      * as if the user had typed the harness's own status text. A real prompt
      * carries `source.kind == "user"`.
      */
+    /**
+     * The plugin that emitted a notice, e.g. `tool-jobs` or `model-selection`.
+     *
+     * `source.kind == "plugin"` marks a message as the harness reporting its own
+     * state rather than a person typing; the plugin name is the stable part of
+     * that report and `summary` is often absent.
+     */
+    fun noticePlugin(event: SessionEvent): String? {
+        val source = (event.data as? JsonObject)?.get("source") as? JsonObject ?: return null
+        if ((source["kind"] as? JsonPrimitive)?.contentOrNull != "plugin") return null
+        return (source["plugin"] as? JsonPrimitive)?.contentOrNull
+    }
+
+    /** The one-line summary a plugin attached to its notice, if any. */
+    fun noticeSummary(event: SessionEvent): String? {
+        val source = (event.data as? JsonObject)?.get("source") as? JsonObject ?: return null
+        return (source["summary"] as? JsonPrimitive)?.contentOrNull?.lineSequence()?.firstOrNull()?.trim()
+    }
+
+    /** One row of a `todo/write` snapshot: the plan the model is working to. */
+    data class Todo(val content: String, val status: String)
+
+    /**
+     * Read the todo list a `todo/write` event replaces wholesale.
+     *
+     * Every write carries the complete list, so the newest event is the plan --
+     * there is no delta to fold. Statuses are `pending`, `in_progress`, and
+     * `completed`; anything else is shown verbatim rather than dropped, because a
+     * status this build has not seen is still information.
+     */
+    fun todoList(event: SessionEvent): List<Todo>? {
+        val data = event.data as? JsonObject ?: return null
+        val todos = data["todos"] as? JsonArray ?: return null
+        return todos.mapNotNull { entry ->
+            val row = entry as? JsonObject ?: return@mapNotNull null
+            val content = (row["content"] as? JsonPrimitive)?.contentOrNull?.trim() ?: return@mapNotNull null
+            if (content.isEmpty()) return@mapNotNull null
+            Todo(content, (row["status"] as? JsonPrimitive)?.contentOrNull ?: "pending")
+        }.takeIf { it.isNotEmpty() }
+    }
+
+    /** One file a turn declared as a deliverable. */
+    data class DeliveredFile(val path: String, val description: String?)
+
+    /**
+     * Read the files a `deliverables/presented` event announces.
+     *
+     * The paths are absolute and are what the preview reads back over
+     * `workspaceFiles/read`; `description` is the model's own note about why the
+     * file matters, which is usually more useful than the name.
+     */
+    fun deliveredFiles(event: SessionEvent): List<DeliveredFile>? {
+        val data = event.data as? JsonObject ?: return null
+        val files = data["files"] as? JsonArray ?: return null
+        return files.mapNotNull { entry ->
+            val row = entry as? JsonObject ?: return@mapNotNull null
+            val path = (row["path"] as? JsonPrimitive)?.contentOrNull?.trim() ?: return@mapNotNull null
+            if (path.isEmpty()) return@mapNotNull null
+            DeliveredFile(path, (row["description"] as? JsonPrimitive)?.contentOrNull)
+        }.takeIf { it.isNotEmpty() }
+    }
+
+    /** The model a `model/selection` event pinned, e.g. `deepseek-flash` + effort. */
+    data class ModelChoice(val provider: String, val model: String, val effort: String?)
+
+    fun modelChoice(event: SessionEvent): ModelChoice? {
+        val data = event.data as? JsonObject ?: return null
+        val model = (data["model"] as? JsonPrimitive)?.contentOrNull ?: return null
+        val provider = (data["provider"] as? JsonPrimitive)?.contentOrNull ?: ""
+        return ModelChoice(provider, model, (data["reasoningEffort"] as? JsonPrimitive)?.contentOrNull)
+    }
+
+    /** A session-scoped setting change the transcript is worth marking. */
+    fun settingChange(event: SessionEvent): Pair<String, String>? {
+        val data = event.data as? JsonObject ?: return null
+        fun value(key: String) = (data[key] as? JsonPrimitive)?.contentOrNull
+        return when (event.type) {
+            "permission/preset" -> value("preset")?.let { "permission" to it }
+            "sandbox/mode" -> value("mode")?.let { "sandbox" to it }
+            "approval/policy" -> value("policy")?.let { "approval" to it }
+            "compaction/start" -> "compaction" to "summarizing history"
+            "compaction/end" -> "compaction" to "history summarized"
+            else -> null
+        }
+    }
+
+    /**
+     * What a `turn/end` says, or null when the turn simply finished.
+     *
+     * `TurnEndReasonMap` has six members: `completed`, `aborted`, `blocked`,
+     * `error`, `max-tokens`, and `interrupted`. Only `completed` is unremarkable
+     * -- a turn that was aborted, blocked, cut off at the token ceiling, or
+     * orphaned by a crash is exactly what a reader needs told, and it is
+     * otherwise invisible because the transcript just stops.
+     */
+    fun turnOutcome(event: SessionEvent): String? {
+        val reason = ((event.data as? JsonObject)?.get("reason") as? JsonObject) ?: return null
+        val kind = (reason["kind"] as? JsonPrimitive)?.contentOrNull ?: return null
+        return when (kind) {
+            "completed" -> null
+            "error" -> {
+                val error = reason["error"] as? JsonObject
+                // Provider messages arrive with a trailing newline; trimming keeps
+                // the note one clean line.
+                val message = error?.get("message")?.jsonPrimitive?.contentOrNull?.trim()
+                val code = error?.get("code")?.jsonPrimitive?.contentOrNull
+                "turn failed: " + (message?.take(300)?.takeIf { it.isNotEmpty() } ?: code ?: "unknown error")
+            }
+            "max-tokens" -> "turn hit its output-token ceiling"
+            "interrupted" -> "turn was interrupted (the session was closed mid-turn)"
+            "aborted" -> "turn aborted"
+            "blocked" -> "turn blocked"
+            // A plugin may merge its own reason into the map; naming it is better
+            // than dropping the row.
+            else -> "turn ended: $kind"
+        }
+    }
+
     fun isNotice(event: SessionEvent): Boolean {
         val source = (event.data as? JsonObject)?.get("source") as? JsonObject ?: return false
         return source["kind"]?.jsonPrimitive?.contentOrNull == "plugin"

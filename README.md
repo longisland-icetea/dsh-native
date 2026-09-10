@@ -1,101 +1,48 @@
 # dsh-native
 
-A minimal native Android client for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
-talking the harness Remote protocol directly over the LAN.
+An Android client that talks to a DSH backend directly over its own protocol, so
+a phone can read and drive a session without the browser bundle.
 
 ## Why this exists
 
-The web GUI is a large client: one boot pulls ~5.25 MiB of gzipped JavaScript
-(59 plugin modules, a vendor bundle, 40 lazy language chunks). On a phone that
-is both a transfer and a parse cost on every cold start, and shrinking it means
-either patching DSH's built-in packages or shipping a full GUI in an app — both
-of which are hard to keep alive across upgrades.
+The mobile web client re-downloads its bundle on every reconnect — tens of
+megabytes over a phone connection. This app speaks the harness's own protocol
+instead: unary `POST /api/<ns>/<method>` for calls and one WebSocket
+(`/api/remote.mux`) for streams, with the transcript rendered natively.
 
-This client takes the other path: it speaks the *protocol* (which is small) and
-renders a fraction of the surface (which is the actual work). Measured reconnect
-cost is one `session/follow` snapshot plus deltas, not a page repaint.
+## Layout
 
-## Requirements
-
-- A harness reachable on the LAN, with [`dsh-lan-access`](https://github.com/longisland-icetea/dsh-lan-access)
-  enabled **and `noAuth: true`** in its settings. That removes DSH's browser
-  session gate (launch token → signed cookie), which is what lets a non-browser
-  client use plain `POST /api/...` and `ws://.../api/remote.mux` with no pairing
-  and no TLS.
-- Plain HTTP on the LAN. The app refuses any non-`http`/`ws` endpoint, so do not
-  expose the port beyond a network you trust — with `noAuth` set, anything that
-  can reach the port can drive the agent.
-
-## The protocol, as measured against 0.1.5-rc.1
-
-Documented here because it is not published anywhere and everything in
-`Protocol.kt` / `DshClient.kt` comes from probing a live host.
-
-### Unary calls — plain HTTP
-
-```
-POST /api/<namespace>/<method>
-{"type":"client-request","rpcId":"<uuid>","method":"session/list","payload":{"args":{...}}}
-
-→ {"type":"server-response","rpcId":"<uuid>",
-   "result":{"ok":true,"value":{...}}}          // or {"ok":false,"error":{code,message}}
-```
-
-`args` holds **named** parameters, and the names are not uniform:
-
-| method | args |
+| path | what |
 |---|---|
-| `session/list` | `{"_request":{}}` — the parameter really is `_request` |
-| `session/follow` | `{"request":{address,maxMessages,assistantStream}}` |
-| `session/page` | `{"request":{address,throughSeq,beforeSeq,maxMessages}}` |
-| `session/prompt` | `{"request":{requestId,sessionId,mode,content}}` |
-| `session/cancel` | `{"request":{sessionId}}` |
+| `app/src/main/java/.../Protocol.kt` | wire types and decoders |
+| `app/src/main/java/.../DshClient.kt` | OkHttp transport: unary calls, mux streams, reconnect loop |
+| `app/src/main/java/.../AppState.kt` | state holder, event → transcript reducer, actions |
+| `app/src/main/java/.../MainActivity.kt` | Compose UI |
+| `app/src/main/java/.../SimpleMarkdown.kt` | hand-written Markdown subset |
+| `app/src/main/java/.../CodeHighlight.kt` | hand-written syntax highlighting |
+| `docs/event-coverage.md` | every session event type, and how each is rendered |
+| `tools/README.md` | Gradle-free build, local test runner, protocol probing |
 
-`SessionAddress` is a discriminated union, **not** `{sessionId,cwd}` — the host
-rejects the flat form with `gateway/input-invalid`:
+## Building
 
-```json
-{"kind":"session","sessionId":"session-…"}
-{"kind":"subagent","parentSessionId":"…","childSessionId":"…","mode":"one-shot"}
-```
+Gradle cannot run in the development VM, so `./tools/build.sh` drives the same
+tools Gradle would (`aapt2`, `kotlinc`, `d8`, `zipalign`, `apksigner`) and
+produces `build/dsh-native-debug.apk`. `./tools/run-jvm-tests.sh` runs the unit
+tests locally. CI (`.github/workflows/android.yml`) runs the same tests through
+Gradle and builds a debug APK.
 
-### Streams — one multiplexed WebSocket
+## Notes that are easy to get wrong
 
-```
-ws://<host>:3080/api/remote.mux
-
-→ {"type":"open","streamId":"<uuid>","endpoint":"session/follow","payload":{"args":{…}}}
-→ {"type":"cancel","streamId":"<uuid>"}
-
-← {"type":"item","streamId":"…","value":{…}}     // increments
-← {"type":"end"|"error","streamId":"…"}
-```
-
-`session/follow` opens with `{type:"snapshot",header,cursor,records,hasMore,
-projections}` and then streams `{type:"event",event:{…}}` plus process-local
-`{type:"assistant-stream",frame:{…}}` chunks. `records` hold
-`{type:"event",event:{seq,type,time,data}}`; `data` has no closed schema, so
-`extractText` walks the shapes the wire actually uses instead of betting on one
-path.
-
-Measured on a live host:
-
-| exchange | size |
-|---|---|
-| `$events` ready frame | 137 B |
-| `session/list` (53 sessions, projections) | 126 KB raw / 44 KB gzip |
-| `session/follow` snapshot (26 records, `hasMore:true`) | 49,761 B |
-| `session/page` (30 records) | ~48 KB |
-
-## Status
-
-Prototype. Verified: it compiles in CI and produces an installable APK.
-**Not yet verified on a device** — the protocol layer is written from live
-probes, and the UI has had no runtime exercise.
-
-Implemented: endpoint configuration, session list, follow with live deltas,
-older-history paging, prompt, cancel, tool-activity rows, code highlighting,
-inline Markdown, reconnect with capped backoff.
-
-Not implemented: image/file attachments, `present` deliverables, approval
-prompts, subagent panels, session search, model selection.
+- **Event shapes come from the wire, never from a guess.** Two features were
+  broken by invented payloads (the tool-result fold and the model catalog call),
+  so `docs/event-coverage.md` records where each shape was observed and
+  `EventDecodeTest` pins it with a captured payload.
+- **Uncaught `IOException`s from socket threads kill the process.** OkHttp hands
+  a dropped connection to the thread's uncaught-exception handler, so
+  `DshClient.installSocketCrashGuard` absorbs exactly that class of failure —
+  every other throwable still crashes loudly.
+- **Network work belongs on `Dispatchers.IO`.** The mux reader loop on the main
+  dispatcher died with `NetworkOnMainThreadException` and took the process with
+  it.
+- **The Host owns workspace grouping and the archive set**; the client only
+  renders what `workspace/follow` reports. There is no unarchive API.
