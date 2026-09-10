@@ -270,7 +270,7 @@ object FollowCodec {
             index = obj["index"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
             // A chunk carries the same block shape as a finished message, so the
             // same text-only filter applies (reasoning deltas are not the reply).
-            text = chunkText(obj["chunk"]),
+            text = EventPayload.chunkText(obj["chunk"]),
         )
     }
 
