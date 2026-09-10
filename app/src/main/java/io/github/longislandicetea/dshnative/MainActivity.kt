@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -89,7 +90,7 @@ private val scheme = darkColorScheme(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val holder = AppStateHolder(lifecycleScope)
+        val holder = AppStateHolder(lifecycleScope, applicationContext)
         setContent {
             MaterialTheme(colorScheme = scheme) {
                 DshApp(holder, applicationContext)
@@ -139,6 +140,9 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                     },
                     onRefresh = holder::refreshSessions,
                     onSettings = { showSettings = true },
+                    onToggleGroup = holder::toggleGroup,
+                    onArchive = holder::setArchived,
+                    onShowArchived = holder::setShowArchived,
                 )
             }
         },
@@ -243,6 +247,9 @@ private fun SessionDrawer(
     onPick: (SessionSummary) -> Unit,
     onRefresh: () -> Unit,
     onSettings: () -> Unit,
+    onToggleGroup: (String) -> Unit,
+    onArchive: (String, Boolean) -> Unit,
+    onShowArchived: (Boolean) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(PANEL)) {
         Row(
@@ -286,30 +293,63 @@ private fun SessionDrawer(
                     )
                 }
             }
-            items(state.sessions, key = { it.sessionId }) { session ->
-                val active = state.conversation?.sessionId == session.sessionId
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { onPick(session) }
-                        .background(if (active) Color(0xFF262B36) else Color.Transparent)
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                ) {
-                    Text(
-                        text = session.title,
-                        fontSize = 13.sp,
-                        maxLines = 2,
-                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (session.running) {
-                            Text("running", color = ACCENT, fontSize = 10.sp)
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        Text(session.cwd ?: "", color = MUTED, fontSize = 10.sp, maxLines = 1)
+            if (state.archived.isNotEmpty()) {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onShowArchived(!state.showArchived) }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = if (state.showArchived) "Hide archived (${state.archived.size})"
+                            else "Show archived (${state.archived.size})",
+                            color = ACCENT, fontSize = 12.sp,
+                        )
                     }
                 }
-                HorizontalDivider(color = Color(0xFF23262E))
+            }
+            state.groups.forEach { group ->
+                item(key = "group-${group.key}") {
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable { onToggleGroup(group.key) }
+                            .background(Color(0xFF23262E))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = if (group.expanded) "▾" else "▸",
+                            color = MUTED, fontSize = 12.sp,
+                            modifier = Modifier.width(18.dp),
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = group.label,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                            group.path?.let {
+                                Text(it, color = MUTED, fontSize = 9.sp, maxLines = 1)
+                            }
+                        }
+                        Text(
+                            text = "${group.sessions.size}",
+                            color = MUTED, fontSize = 10.sp,
+                        )
+                    }
+                }
+                if (group.expanded) {
+                    items(group.sessions, key = { it.sessionId }) { session ->
+                        SessionRow(
+                            session = session,
+                            active = state.conversation?.sessionId == session.sessionId,
+                            archived = state.archived.contains(session.sessionId),
+                            onPick = { onPick(session) },
+                            onArchive = { onArchive(session.sessionId, !state.archived.contains(session.sessionId)) },
+                        )
+                    }
+                }
             }
             if (state.log.isNotEmpty()) {
                 item {
@@ -433,6 +473,57 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
 }
 
 /** One answerable Host call: tool, reason, and its decisions. */
+/** One session row: title, cwd, running state, and a long-press archive action. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun SessionRow(
+    session: SessionSummary,
+    active: Boolean,
+    archived: Boolean,
+    onPick: () -> Unit,
+    onArchive: () -> Unit,
+) {
+    var menu by remember { mutableStateOf(false) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onPick, onLongClick = { menu = true })
+            .background(if (active) Color(0xFF262B36) else Color.Transparent)
+            .padding(start = 30.dp, end = 16.dp, top = 10.dp, bottom = 10.dp),
+    ) {
+        Text(
+            text = session.title,
+            fontSize = 13.sp,
+            maxLines = 2,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (archived) MUTED else Color(0xFFDDE2EC),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (session.running) {
+                Text("running", color = ACCENT, fontSize = 10.sp)
+                Spacer(Modifier.width(8.dp))
+            }
+            if (session.origin == "subagent") {
+                Text("subagent", color = MUTED, fontSize = 10.sp)
+                Spacer(Modifier.width(8.dp))
+            }
+        }
+    }
+    if (menu) {
+        AlertDialog(
+            onDismissRequest = { menu = false },
+            title = { Text(session.title, fontSize = 14.sp) },
+            text = null,
+            confirmButton = {
+                TextButton(onClick = { onArchive(); menu = false }) {
+                    Text(if (archived) "Unarchive" else "Archive")
+                }
+            },
+            dismissButton = { TextButton(onClick = { menu = false }) { Text("Cancel") } },
+        )
+    }
+}
+
 @Composable
 private fun PendingCard(interaction: PendingInteraction, holder: AppStateHolder) {
     Surface(

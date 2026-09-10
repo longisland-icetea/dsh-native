@@ -92,6 +92,62 @@ data class Conversation(
     val error: String? = null,
 )
 
+/**
+ * Sessions grouped the way the desktop sidebar groups them.
+ *
+ * `session/list` carries no workspace or archive fields — the desktop derives
+ * both from `cwd` plus client-side state — so the same derivation happens here:
+ * ordinary sessions (a subagent's own session is a child, not a row), a blank
+ * session only while it is the current one, grouped by directory and ordered
+ * newest-first with the id as tiebreak.
+ */
+data class SessionGroup(
+    val key: String,
+    val label: String,
+    val path: String?,
+    val sessions: List<SessionSummary>,
+    val expanded: Boolean,
+) {
+    val newestAt: Long get() = sessions.maxOfOrNull { it.updatedAt } ?: 0L
+    companion object {
+        fun labelOf(cwd: String?): String {
+            val path = cwd?.trimEnd('/') ?: return ""
+            if (path.isEmpty()) return ""
+            return path.substringAfterLast('/').ifEmpty { path }
+        }
+
+        /** Build groups from a flat list; [archived] and [expanded] are per-device state. */
+        fun derive(
+            sessions: List<SessionSummary>,
+            currentId: String?,
+            archived: Set<String>,
+            collapsed: Set<String>,
+            showArchived: Boolean,
+        ): List<SessionGroup> {
+            val visible = sessions.filter { session ->
+                session.origin != "subagent" &&
+                    (!archived.contains(session.sessionId) || showArchived) &&
+                    (!session.blank || session.sessionId == currentId)
+            }
+            return visible
+                .groupBy { it.cwd ?: "" }
+                .map { (cwd, members) ->
+                    val ordered = members.sortedWith(
+                        compareByDescending<SessionSummary> { it.updatedAt }.thenBy { it.sessionId },
+                    )
+                    SessionGroup(
+                        key = cwd.ifEmpty { "·none" },
+                        label = labelOf(cwd).ifEmpty { "No workspace" },
+                        path = cwd.ifEmpty { null },
+                        sessions = ordered,
+                        expanded = !collapsed.contains(cwd.ifEmpty { "·none" }),
+                    )
+                }
+                .sortedByDescending { it.newestAt }
+        }
+    }
+}
+
 data class AppState(
     val endpoint: DshEndpoint? = null,
     val connected: Boolean = false,
@@ -105,7 +161,16 @@ data class AppState(
     val sessionsBytes: Int = 0,
     /** Host calls blocked on this client, newest last. */
     val pending: List<PendingInteraction> = emptyList(),
-)
+    /** Session ids this device hides; per-device, like the desktop's own view state. */
+    val archived: Set<String> = emptySet(),
+    /** Group keys (cwd) the user collapsed. */
+    val collapsed: Set<String> = emptySet(),
+    val showArchived: Boolean = false,
+) {
+    /** Sessions grouped and ordered for the drawer. */
+    val groups: List<SessionGroup>
+        get() = SessionGroup.derive(sessions, conversation?.sessionId, archived, collapsed, showArchived)
+}
 
 /**
  * Owns the client, the session list, and one live conversation.
@@ -116,9 +181,56 @@ data class AppState(
  */
 private const val TAG = "DshNative"
 
-class AppStateHolder(private val scope: CoroutineScope) {
-    private val _state = MutableStateFlow(AppState())
+/**
+ * Per-device session view state (archive + collapsed groups).
+ *
+ * `session/list` has no archive field: the desktop keeps its own set in browser
+ * storage, so this client keeps its own here. The two do not see each other's
+ * choices; sharing them would need server-side state in a plugin.
+ */
+private class SessionViewStore(context: android.content.Context) {
+    private val prefs = context.getSharedPreferences("dsh_session_view", android.content.Context.MODE_PRIVATE)
+
+    fun archived(): Set<String> = prefs.getStringSet("archived", emptySet()) ?: emptySet()
+    fun collapsed(): Set<String> = prefs.getStringSet("collapsed", emptySet()) ?: emptySet()
+    fun showArchived(): Boolean = prefs.getBoolean("showArchived", false)
+
+    fun saveArchived(value: Set<String>) = prefs.edit().putStringSet("archived", value).apply()
+    fun saveCollapsed(value: Set<String>) = prefs.edit().putStringSet("collapsed", value).apply()
+    fun saveShowArchived(value: Boolean) = prefs.edit().putBoolean("showArchived", value).apply()
+}
+
+class AppStateHolder(private val scope: CoroutineScope, context: android.content.Context? = null) {
+    private val viewStore = context?.let(::SessionViewStore)
+    private val _state = MutableStateFlow(
+        AppState(
+            archived = viewStore?.archived() ?: emptySet(),
+            collapsed = viewStore?.collapsed() ?: emptySet(),
+            showArchived = viewStore?.showArchived() ?: false,
+        ),
+    )
     val state: StateFlow<AppState> = _state.asStateFlow()
+
+    fun toggleGroup(key: String) {
+        _state.update { current ->
+            val next = if (current.collapsed.contains(key)) current.collapsed - key else current.collapsed + key
+            viewStore?.saveCollapsed(next)
+            current.copy(collapsed = next)
+        }
+    }
+
+    fun setArchived(sessionId: String, archived: Boolean) {
+        _state.update { current ->
+            val next = if (archived) current.archived + sessionId else current.archived - sessionId
+            viewStore?.saveArchived(next)
+            current.copy(archived = next)
+        }
+    }
+
+    fun setShowArchived(value: Boolean) {
+        viewStore?.saveShowArchived(value)
+        _state.update { it.copy(showArchived = value) }
+    }
 
     private var client: DshClient? = null
     private var followJob: Job? = null

@@ -163,6 +163,9 @@ data class SessionSummary(
     val updatedAt: Long = 0,
     val running: Boolean = false,
     val blank: Boolean = false,
+    /** `subagent` marks a child session, which the list shows under its parent. */
+    val origin: String? = null,
+    val parentSessionId: String? = null,
     val cwd: String? = null,
     val projections: JsonElement? = null,
 ) {
@@ -195,6 +198,8 @@ object SessionListCodec {
                 updatedAt = obj.long("updatedAt") ?: 0L,
                 running = obj.bool("running") ?: false,
                 blank = obj.bool("blank") ?: false,
+                origin = obj.string("origin"),
+                parentSessionId = obj.string("parentSessionId"),
                 cwd = obj.string("cwd"),
                 projections = obj["projections"],
             )
