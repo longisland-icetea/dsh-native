@@ -1,6 +1,7 @@
 package io.github.longislandicetea.dshnative
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
@@ -72,6 +73,12 @@ class DshClient(
     private val scope: CoroutineScope,
 ) {
     private val http: OkHttpClient = OkHttpClient.Builder()
+        // Without an explicit dispatcher OkHttp runs its callbacks on the thread
+        // that created the socket. The mux WebSocket is created from the main
+        // thread, so its reader loop then reads the socket on the main thread and
+        // any transport error kills the process with a SocketException instead of
+        // reaching the retry logic.
+        .dispatcher(okhttp3.Dispatcher(java.util.concurrent.Executors.newCachedThreadPool()))
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
@@ -335,6 +342,28 @@ class DshClient(
      * A client that never opens this stream cannot be asked anything.
      */
     fun events(): Flow<MuxFrame> = openStream(DshWire.EVENT_STREAM_ENDPOINT, buildJsonObject { })
+
+    /**
+     * Workspace browser state: the baseline carries every Workspace with its
+     * canonical session order plus the Host's archive set, then ordered
+     * increments follow. This is the Host's own grouping, not a local
+     * derivation, so titles and ordering match the desktop.
+     */
+    fun workspaces(): Flow<MuxFrame> = openStream("workspace/follow", buildJsonObject { })
+
+    /** Archive one session; the Host answers with the complete resulting set. */
+    suspend fun archiveSession(sessionId: String): List<String> {
+        val args = buildJsonObject {
+            put(
+                "request",
+                json.encodeToJsonElement(ArchiveSessionRequest.serializer(), ArchiveSessionRequest(sessionId)),
+            )
+        }
+        val value = call("workspace/archiveSession", args)
+        return runCatching {
+            json.decodeFromJsonElement(ArchiveValue.serializer(), value).archivedSessionIds
+        }.getOrDefault(emptyList())
+    }
 
     /**
      * Answer one waterfall. The value is the listener's return value on the

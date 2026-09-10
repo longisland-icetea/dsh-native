@@ -157,6 +157,44 @@ object MuxFrames {
     }
 }
 
+/**
+ * One Workspace as the Host defines it.
+ *
+ * The Host owns workspace grouping: `sessionIds` is the membership and order it
+ * considers canonical, and `title` is the label the desktop shows. Deriving
+ * groups from `cwd` locally (an earlier attempt) produced the right shape but
+ * the wrong labels and ignored the order the user had arranged.
+ */
+@Serializable
+data class WorkspaceView(
+    val workspaceId: String,
+    val path: String,
+    val title: String,
+    val sessionIds: List<String> = emptyList(),
+    val createdAt: String? = null,
+)
+
+/** Reconnect baseline for the workspace browser. */
+@Serializable
+data class WorkspaceBaseline(
+    val items: List<WorkspaceView> = emptyList(),
+    val archivedSessionIds: List<String> = emptyList(),
+)
+
+/** One ordered change after a baseline. */
+@Serializable
+data class WorkspaceIncrement(
+    val type: String,
+    val workspace: WorkspaceView? = null,
+    val workspaceId: String? = null,
+)
+
+@Serializable
+data class ArchiveSessionRequest(val sessionId: String)
+
+@Serializable
+data class ArchiveValue(val archivedSessionIds: List<String> = emptyList())
+
 @Serializable
 data class SessionSummary(
     val sessionId: String,
@@ -250,6 +288,21 @@ data class PromptRequest(
 @Serializable
 data class CancelRequest(val sessionId: String)
 
+/** One tool invocation: what was called, with what, and its correlation id. */
+data class ToolCall(
+    val name: String,
+    val callId: String?,
+    val arguments: JsonObject?,
+    val rawArguments: String?,
+)
+
+/** Output of one tool invocation, correlated to its call by id. */
+data class ToolResult(
+    val toolCallId: String?,
+    val text: String?,
+    val isError: Boolean,
+)
+
 /** One durable event from a followed session. */
 data class SessionEvent(
     val seq: Long,
@@ -267,7 +320,7 @@ data class SessionEvent(
     /** Compact one-line description for events rendered as activity. */
     val label: String
         get() = when (type) {
-            "tool/call" -> EventPayload.toolCallOf(this)?.first?.let { "→ $it" } ?: "→ tool"
+            "tool/call" -> EventPayload.toolCallOf(this)?.name?.let { "→ $it" } ?: "→ tool"
             "tool/result" -> "← result"
             "step/start" -> "step"
             "step/end" -> "step done"
@@ -280,8 +333,8 @@ data class SessionEvent(
     /** Secondary line for activity rows (tool arguments, tool output). */
     val detail: String?
         get() = when (type) {
-            "tool/call" -> EventPayload.toolCallOf(this)?.second
-            "tool/result" -> EventPayload.textOf(this)?.replace('\n', ' ')?.take(200)
+            "tool/call" -> EventPayload.toolCallOf(this)?.rawArguments?.replace('\n', ' ')?.take(160)
+            "tool/result" -> EventPayload.toolResultOf(this)?.text?.replace('\n', ' ')?.take(200)
             else -> null
         }
 }
@@ -398,12 +451,53 @@ object EventPayload {
         return joined.ifBlank { null }
     }
 
-    /** `tool/call` specifics: the tool name and a one-line argument preview. */
-    fun toolCallOf(event: SessionEvent): Pair<String, String?>? {
+    /**
+     * `tool/call` specifics: the tool name, its parsed arguments, and the
+     * correlation id.
+     *
+     * `arguments` is a JSON *string*, not an object, so it is parsed here; a
+     * tool that sends something unparsable still yields its raw text rather than
+     * losing the call.
+     */
+    fun toolCallOf(event: SessionEvent): ToolCall? {
         val obj = event.data as? JsonObject ?: return null
         val name = (obj["name"] as? JsonPrimitive)?.contentOrNull ?: return null
-        val arguments = (obj["arguments"] as? JsonPrimitive)?.contentOrNull
-        return name to arguments?.replace('\n', ' ')?.take(160)
+        val raw = (obj["arguments"] as? JsonPrimitive)?.contentOrNull
+        val parsed = raw?.let { text ->
+            runCatching { DshWire.json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+        }
+        return ToolCall(
+            name = name,
+            callId = (obj["callId"] as? JsonPrimitive)?.contentOrNull,
+            arguments = parsed,
+            rawArguments = raw,
+        )
+    }
+
+    /**
+     * `tool/result` payload: the tool's output text and whether it failed.
+     *
+     * Measured shape: `data.message.content[]` holds exactly one `tool-result`
+     * block whose own `content[]` carries the text; `toolCallId` correlates it
+     * back to the call and `isError` marks failure. Note the two levels of
+     * `content` — reading only the outer one yields nothing.
+     */
+    fun toolResultOf(event: SessionEvent): ToolResult? {
+        val outer = ((event.data as? JsonObject)?.get("message") as? JsonObject) ?: (event.data as? JsonObject)
+        val blocks = (outer?.get("content") as? JsonArray) ?: return null
+        for (part in blocks) {
+            val block = part as? JsonObject ?: continue
+            if (block["type"]?.jsonPrimitive?.contentOrNull != "tool-result") continue
+            val text = (block["content"] as? JsonArray)?.mapNotNull { item ->
+                ((item as? JsonObject)?.get("text") as? JsonPrimitive)?.takeIf { it.isString }?.content
+            }.orEmpty().joinToString("\n")
+            return ToolResult(
+                toolCallId = block["toolCallId"]?.jsonPrimitive?.contentOrNull,
+                text = text.ifBlank { null },
+                isError = block["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
+            )
+        }
+        return null
     }
 
     /**

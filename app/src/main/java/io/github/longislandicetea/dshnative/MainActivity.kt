@@ -68,6 +68,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.launch
 
 private val INK = Color(0xFF16181D)
@@ -141,7 +143,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                     onRefresh = holder::refreshSessions,
                     onSettings = { showSettings = true },
                     onToggleGroup = holder::toggleGroup,
-                    onArchive = holder::setArchived,
+                    onArchive = holder::archive,
                     onShowArchived = holder::setShowArchived,
                 )
             }
@@ -248,7 +250,7 @@ private fun SessionDrawer(
     onRefresh: () -> Unit,
     onSettings: () -> Unit,
     onToggleGroup: (String) -> Unit,
-    onArchive: (String, Boolean) -> Unit,
+    onArchive: (String) -> Unit,
     onShowArchived: (Boolean) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(PANEL)) {
@@ -346,7 +348,7 @@ private fun SessionDrawer(
                             active = state.conversation?.sessionId == session.sessionId,
                             archived = state.archived.contains(session.sessionId),
                             onPick = { onPick(session) },
-                            onArchive = { onArchive(session.sessionId, !state.archived.contains(session.sessionId)) },
+                            onArchive = { onArchive(session.sessionId) },
                         )
                     }
                 }
@@ -566,6 +568,8 @@ private fun TranscriptRow(item: TranscriptItem) {
     when (item) {
         is TranscriptItem.User -> UserBubble(item.text)
         is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming)
+        is TranscriptItem.ToolCall -> ToolCard(item)
+        is TranscriptItem.ToolResultRow -> ActivityRow("← result", item.text?.take(200))
         is TranscriptItem.Activity -> ActivityRow(item.label, item.detail)
         is TranscriptItem.Note -> Text(item.text, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp))
     }
@@ -640,6 +644,115 @@ private fun CodeBlock(language: String?, code: String) {
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
             )
+        }
+    }
+}
+
+/**
+ * One tool invocation.
+ *
+ * Collapsed it shows the tool and its most identifying argument (the command, the
+ * path) because that is what makes a long tool-heavy turn scannable; expanded it
+ * shows every argument and the full output. Failures stay marked even collapsed,
+ * so a failed step cannot scroll past unnoticed.
+ */
+@Composable
+private fun ToolCard(call: TranscriptItem.ToolCall) {
+    var expanded by remember { mutableStateOf(false) }
+    val accent = if (call.failed) WARN else ACCENT
+    val args = call.arguments
+
+    /** The argument that identifies the call at a glance. */
+    fun argText(key: String): String? = (args?.get(key) as? JsonPrimitive)?.contentOrNull
+    val preview: String? = when (call.name) {
+        "bash", "pwsh" -> argText("command") ?: argText("description")
+        "read", "write", "edit" -> argText("file_path") ?: argText("path")
+        else -> argText("command") ?: argText("path") ?: call.rawArguments
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .background(Color(0xFF1A1D23), RoundedCornerShape(8.dp))
+            .clickable { expanded = !expanded }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (expanded) "\u25be" else "\u25b8",
+                color = MUTED,
+                fontSize = 10.sp,
+                modifier = Modifier.width(14.dp),
+            )
+            Text(
+                text = call.name,
+                color = accent,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.width(8.dp))
+            val status = when {
+                call.result == null -> "running"
+                call.failed -> "failed"
+                else -> ""
+            }
+            if (status.isNotEmpty()) {
+                Text(text = status, color = if (call.failed) WARN else MUTED, fontSize = 10.sp)
+            }
+        }
+        if (preview != null && preview.isNotBlank()) {
+            Text(
+                text = preview.replace("\n", " ").take(140),
+                color = MUTED,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = if (expanded) 6 else 1,
+                modifier = Modifier.padding(start = 14.dp, top = 2.dp),
+            )
+        }
+        if (expanded) {
+            if (args != null) {
+                Spacer(Modifier.height(6.dp))
+                args.keys.sorted().forEach { key ->
+                    val value = (args[key] as? JsonPrimitive)?.contentOrNull ?: args[key].toString()
+                    Text(
+                        text = key,
+                        color = MUTED,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(start = 14.dp),
+                    )
+                    Text(
+                        text = value.take(1200),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(start = 22.dp, bottom = 4.dp),
+                    )
+                }
+            }
+            val output = call.result
+            if (output != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "output",
+                    color = MUTED,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(start = 14.dp),
+                )
+                SelectionContainer {
+                    Text(
+                        text = output.take(4000),
+                        color = if (call.failed) WARN else Color(0xFF9FA8B8),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(start = 22.dp, top = 2.dp, bottom = 2.dp),
+                    )
+                }
+            }
         }
     }
 }

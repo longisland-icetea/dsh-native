@@ -74,6 +74,33 @@ sealed interface TranscriptItem {
     data class User(override val key: String, val text: String) : TranscriptItem
     data class Assistant(override val key: String, val text: String, val streaming: Boolean) : TranscriptItem
     data class Activity(override val key: String, val label: String, val detail: String?) : TranscriptItem
+
+    /**
+     * One tool invocation with its outcome, kept as a single row.
+     *
+     * The Host emits `tool/call` and `tool/result` as separate events correlated
+     * by `callId`; rendering them as two unrelated lines makes a long tool-heavy
+     * turn unreadable, so the reducer folds the result into the call it answers.
+     */
+    data class ToolCall(
+        override val key: String,
+        val callId: String?,
+        val name: String,
+        val arguments: kotlinx.serialization.json.JsonObject?,
+        val rawArguments: String?,
+        val result: String?,
+        val failed: Boolean,
+    ) : TranscriptItem {
+        fun callIdOrNull(): String? = callId
+    }
+
+    /** A result waiting to be folded into its call. */
+    data class ToolResultRow(
+        override val key: String,
+        val toolCallId: String?,
+        val text: String?,
+        val failed: Boolean,
+    ) : TranscriptItem
     data class Note(override val key: String, val text: String) : TranscriptItem
 }
 
@@ -116,34 +143,56 @@ data class SessionGroup(
             return path.substringAfterLast('/').ifEmpty { path }
         }
 
-        /** Build groups from a flat list; [archived] and [expanded] are per-device state. */
-        fun derive(
+        /**
+         * Build groups from the Host's own Workspace list.
+         *
+         * Membership and order come from `WorkspaceView.sessionIds`; sessions the
+         * Host has not placed in any Workspace land in a trailing "other" group
+         * rather than disappearing. Archive membership is the Host's set, which
+         * is what makes the choice visible on every client.
+         */
+        fun fromWorkspaces(
             sessions: List<SessionSummary>,
+            workspaces: List<WorkspaceView>,
             currentId: String?,
             archived: Set<String>,
             collapsed: Set<String>,
             showArchived: Boolean,
         ): List<SessionGroup> {
-            val visible = sessions.filter { session ->
-                session.origin != "subagent" &&
+            val byId = sessions.associateBy { it.sessionId }
+            fun visible(session: SessionSummary?): Boolean =
+                session != null &&
+                    session.origin != "subagent" &&
                     (!archived.contains(session.sessionId) || showArchived) &&
                     (!session.blank || session.sessionId == currentId)
+
+            val groups = mutableListOf<SessionGroup>()
+            val accounted = mutableSetOf<String>()
+            for (workspace in workspaces) {
+                val members = workspace.sessionIds.mapNotNull { byId[it] }.filter(::visible)
+                workspace.sessionIds.forEach { accounted += it }
+                groups += SessionGroup(
+                    key = workspace.workspaceId,
+                    label = workspace.title.ifEmpty { labelOf(workspace.path) },
+                    path = workspace.path,
+                    sessions = members,
+                    expanded = !collapsed.contains(workspace.workspaceId),
+                )
             }
-            return visible
-                .groupBy { it.cwd ?: "" }
-                .map { (cwd, members) ->
-                    val ordered = members.sortedWith(
-                        compareByDescending<SessionSummary> { it.updatedAt }.thenBy { it.sessionId },
-                    )
-                    SessionGroup(
-                        key = cwd.ifEmpty { "·none" },
-                        label = labelOf(cwd).ifEmpty { "No workspace" },
-                        path = cwd.ifEmpty { null },
-                        sessions = ordered,
-                        expanded = !collapsed.contains(cwd.ifEmpty { "·none" }),
-                    )
-                }
-                .sortedByDescending { it.newestAt }
+            val stray = sessions.filter { it.sessionId !in accounted && visible(it) }
+                .sortedWith(compareByDescending<SessionSummary> { it.updatedAt }.thenBy { it.sessionId })
+            if (stray.isNotEmpty()) {
+                groups += SessionGroup(
+                    key = "·other",
+                    label = "Other",
+                    path = null,
+                    sessions = stray,
+                    expanded = !collapsed.contains("·other"),
+                )
+            }
+            // Empty Workspaces stay listed: the desktop shows them too, and they
+            // are where a new session would go.
+            return groups
         }
     }
 }
@@ -161,7 +210,9 @@ data class AppState(
     val sessionsBytes: Int = 0,
     /** Host calls blocked on this client, newest last. */
     val pending: List<PendingInteraction> = emptyList(),
-    /** Session ids this device hides; per-device, like the desktop's own view state. */
+    /** Workspaces as the Host defines them, with canonical membership and order. */
+    val workspaces: List<WorkspaceView> = emptyList(),
+    /** The Host's archive set; shared by every client. */
     val archived: Set<String> = emptySet(),
     /** Group keys (cwd) the user collapsed. */
     val collapsed: Set<String> = emptySet(),
@@ -169,7 +220,9 @@ data class AppState(
 ) {
     /** Sessions grouped and ordered for the drawer. */
     val groups: List<SessionGroup>
-        get() = SessionGroup.derive(sessions, conversation?.sessionId, archived, collapsed, showArchived)
+        get() = SessionGroup.fromWorkspaces(
+            sessions, workspaces, conversation?.sessionId, archived, collapsed, showArchived,
+        )
 }
 
 /**
@@ -191,11 +244,9 @@ private const val TAG = "DshNative"
 private class SessionViewStore(context: android.content.Context) {
     private val prefs = context.getSharedPreferences("dsh_session_view", android.content.Context.MODE_PRIVATE)
 
-    fun archived(): Set<String> = prefs.getStringSet("archived", emptySet()) ?: emptySet()
     fun collapsed(): Set<String> = prefs.getStringSet("collapsed", emptySet()) ?: emptySet()
     fun showArchived(): Boolean = prefs.getBoolean("showArchived", false)
 
-    fun saveArchived(value: Set<String>) = prefs.edit().putStringSet("archived", value).apply()
     fun saveCollapsed(value: Set<String>) = prefs.edit().putStringSet("collapsed", value).apply()
     fun saveShowArchived(value: Boolean) = prefs.edit().putBoolean("showArchived", value).apply()
 }
@@ -204,7 +255,6 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private val viewStore = context?.let(::SessionViewStore)
     private val _state = MutableStateFlow(
         AppState(
-            archived = viewStore?.archived() ?: emptySet(),
             collapsed = viewStore?.collapsed() ?: emptySet(),
             showArchived = viewStore?.showArchived() ?: false,
         ),
@@ -219,14 +269,6 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
-    fun setArchived(sessionId: String, archived: Boolean) {
-        _state.update { current ->
-            val next = if (archived) current.archived + sessionId else current.archived - sessionId
-            viewStore?.saveArchived(next)
-            current.copy(archived = next)
-        }
-    }
-
     fun setShowArchived(value: Boolean) {
         viewStore?.saveShowArchived(value)
         _state.update { it.copy(showArchived = value) }
@@ -235,6 +277,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var client: DshClient? = null
     private var followJob: Job? = null
     private var eventsJob: Job? = null
+    private var workspaceJob: Job? = null
     /** Bound by the `$events` ready frame; every answer must name it. */
     private var eventClientId: String? = null
 
@@ -258,6 +301,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             created.log.collect { line -> record(line) }
         }
         openEvents(created)
+        openWorkspaces(created)
         refreshSessions()
     }
 
@@ -268,6 +312,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // A mux that is not up yet, or that just dropped, must not kill the
             // process: `callbackFlow` closing with a cause while nothing collects
             // surfaces as an unhandled exception. Retry until the socket is up.
+            try {
             active.events()
                 .retryWhen { cause, _ ->
                     record("events retry: ${cause.message}")
@@ -306,6 +351,80 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     else -> Unit
                 }
             }
+            } catch (error: Throwable) {
+                // A transport failure can surface from the socket's own thread;
+                // if it escapes here the process dies instead of retrying.
+                record("events stream aborted: ${error.message}")
+            }
+        }
+    }
+
+    /**
+     * Follow the Host's workspace browser state.
+     *
+     * The baseline replaces both grouping and the archive set wholesale, so a
+     * reconnect cannot leave a stale membership behind; increments are applied
+     * on top. This is what makes an archive chosen on the desktop disappear on
+     * the phone, and vice versa.
+     */
+    private fun openWorkspaces(active: DshClient) {
+        workspaceJob?.cancel()
+        workspaceJob = scope.launch(Dispatchers.IO) {
+            try {
+            active.workspaces()
+                .retryWhen { cause, _ ->
+                    record("workspaces retry: ${cause.message}")
+                    delay(2_000)
+                    true
+                }
+                .catch { record("workspaces stopped: ${it.message}") }
+                .collect { frame ->
+                    val value = (frame as? MuxFrame.Item)?.value ?: return@collect
+                    val obj = value as? kotlinx.serialization.json.JsonObject ?: return@collect
+                    when (obj["type"]?.let { (it as? JsonPrimitive)?.contentOrNull }) {
+                        "baseline" -> runCatching {
+                            DshWire.json.decodeFromJsonElement(
+                                WorkspaceBaseline.serializer(),
+                                obj["value"] ?: obj,
+                            )
+                        }.getOrNull()?.let { baseline ->
+                            record("workspaces: ${baseline.items.size} groups, ${baseline.archivedSessionIds.size} archived")
+                            _state.update {
+                                it.copy(
+                                    workspaces = baseline.items,
+                                    archived = baseline.archivedSessionIds.toSet(),
+                                )
+                            }
+                        }
+                        "upsert" -> runCatching {
+                            DshWire.json.decodeFromJsonElement(
+                                WorkspaceIncrement.serializer(),
+                                obj["value"] ?: obj,
+                            )
+                        }.getOrNull()?.workspace?.let { updated ->
+                            _state.update { current ->
+                                val next = current.workspaces.filterNot { it.workspaceId == updated.workspaceId } + updated
+                                current.copy(workspaces = next.sortedBy { it.createdAt ?: "" })
+                            }
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                record("workspaces stream aborted: ${error.message}")
+            }
+        }
+    }
+
+    /** Archive one session on the Host; every client sees the resulting set. */
+    fun archive(sessionId: String) {
+        val active = client ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.archiveSession(sessionId) }
+                .onSuccess { ids ->
+                    record("archived (${ids.size} total)")
+                    _state.update { it.copy(archived = ids.toSet()) }
+                }
+                .onFailure { record("archive failed: ${it.message}") }
         }
     }
 
@@ -326,6 +445,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         followJob = null
         eventsJob?.cancel()
         eventsJob = null
+        workspaceJob?.cancel()
+        workspaceJob = null
         eventClientId = null
         _state.update { it.copy(pending = emptyList()) }
         client?.stop()
@@ -342,16 +463,24 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
         scope.launch(Dispatchers.IO) {
             _state.update { it.copy(sessionsError = null) }
-            runCatching { active.listSessionsDetailed() }
-                .onSuccess { (sessions, bytes) ->
+            // The harness may not be reachable yet on the first attempt (the app
+            // starts before the network settles), so retry rather than leaving an
+            // empty list that looks like "no sessions".
+            var attempt = 0
+            while (true) {
+                val result = runCatching { active.listSessionsDetailed() }
+                result.onSuccess { (sessions, bytes) ->
                     record("session/list ok: ${sessions.size} sessions, ${bytes}B")
                     _state.update { it.copy(sessions = sessions, sessionsBytes = bytes, sessionsError = null) }
-                }
-                .onFailure { error ->
+                    return@launch
+                }.onFailure { error ->
                     val message = "${error::class.simpleName}: ${error.message}"
-                    record("session/list FAILED: $message")
+                    record("session/list failed (attempt ${attempt + 1}): $message")
                     _state.update { it.copy(sessionsError = message) }
                 }
+                if (++attempt >= 10) return@launch
+                delay(2_000)
+            }
         }
     }
 
@@ -390,6 +519,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         val active = client ?: return
         followJob?.cancel()
         followJob = scope.launch(Dispatchers.IO) {
+            try {
             active.follow(sessionId)
                 .retryWhen { cause, _ ->
                     _state.update { current ->
@@ -406,6 +536,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     }
                 }
                 .collect { frame -> reduce(sessionId, title, frame) }
+            } catch (error: Throwable) {
+                _state.update { current ->
+                    val live = current.conversation ?: return@update current
+                    current.copy(conversation = live.copy(error = error.message))
+                }
+            }
         }
     }
 
@@ -429,10 +565,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         is FollowFrame.Snapshot -> {
             // The snapshot is the newest window, not a delta: rebuild by seq so a
             // reconnect cannot duplicate or reorder what is already on screen.
-            val merged = (conversation.items + frame.records.map(::toItem))
-                .associateBy { it.key }
-                .values
-                .sortedBy(::seqOf)
+            val merged = pairToolResults(
+                (conversation.items + frame.records.map(::toItem))
+                    .associateBy { it.key }
+                    .values
+                    .sortedBy(::seqOf),
+            )
             conversation.copy(
                 title = conversation.title.ifEmpty { conversation.sessionId.takeLast(8) },
                 items = merged,
@@ -445,7 +583,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
 
         is FollowFrame.Event -> conversation.copy(
-            items = (conversation.items + toItem(frame.event)).distinctBy { it.key },
+            items = pairToolResults((conversation.items + toItem(frame.event)).distinctBy { it.key }),
             lastSeq = maxOf(conversation.lastSeq, frame.event.seq),
             running = when (frame.event.type) {
                 "turn/start" -> true
@@ -468,15 +606,62 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private fun toItem(event: SessionEvent): TranscriptItem {
         val key = "seq-${event.seq}"
         val text = event.text
-        return when {
-            event.type == "user/message" && text != null -> TranscriptItem.User(key, text)
+        return when (event.type) {
+            "user/message" -> text?.let { TranscriptItem.User(key, it) }
+                ?: TranscriptItem.Activity(key, event.label, event.detail)
             // An assistant message may carry only tool calls and no prose, which
             // is a normal step rather than a renderable reply.
-            event.type == "assistant/message" && text != null -> TranscriptItem.Assistant(key, text, streaming = false)
-            event.type == "turn/end" -> TranscriptItem.Note(key, "turn finished")
-            event.type == "tool/result" -> TranscriptItem.Activity(key, event.label, event.detail)
-            text != null -> TranscriptItem.Activity(key, event.label, text.take(400))
-            else -> TranscriptItem.Activity(key, event.label, event.detail)
+            "assistant/message" -> text?.let { TranscriptItem.Assistant(key, it, streaming = false) }
+                ?: TranscriptItem.Activity(key, event.label, event.detail)
+            "turn/end" -> TranscriptItem.Note(key, "turn finished")
+            "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
+                TranscriptItem.ToolCall(
+                    key = key,
+                    callId = call.callId,
+                    name = call.name,
+                    arguments = call.arguments,
+                    rawArguments = call.rawArguments,
+                    result = null,
+                    failed = false,
+                )
+            } ?: TranscriptItem.Activity(key, event.label, event.detail)
+            // A result is folded into its call by pairToolResults once the whole
+            // window is known; standalone here so nothing is ever dropped.
+            "tool/result" -> {
+                val result = EventPayload.toolResultOf(event)
+                TranscriptItem.ToolResultRow(key, result?.toolCallId, result?.text, result?.isError ?: false)
+            }
+            else -> if (text != null) TranscriptItem.Activity(key, event.label, text.take(400))
+            else TranscriptItem.Activity(key, event.label, event.detail)
+        }
+    }
+
+    /**
+     * Fold every `tool/result` row into the `tool/call` row it answers.
+     *
+     * Pairing is done over the whole window rather than as events arrive,
+     * because paging and reconnects can deliver the halves in either order and
+     * the reducer itself must stay free of side effects. A result with no
+     * matching call in this window keeps its own row instead of disappearing.
+     */
+    private fun pairToolResults(items: List<TranscriptItem>): List<TranscriptItem> {
+        val results = items.filterIsInstance<TranscriptItem.ToolResultRow>()
+        if (results.isEmpty()) return items
+        val byCallId = results.mapNotNull { row -> row.toolCallId?.let { it to row } }.toMap()
+        if (byCallId.isEmpty()) return items
+        // Calls consume their result in order, so a repeated callId across turns
+        // still pairs with the nearest unconsumed call.
+        val consumed = mutableSetOf<String>()
+        return items.mapNotNull { item ->
+            when {
+                item is TranscriptItem.ToolCall -> {
+                    val row = byCallId[item.callIdOrNull()]?.takeIf { it.key !in consumed }
+                    if (row != null) consumed += row.key
+                    item.copy(result = row?.text ?: item.result, failed = row?.failed ?: item.failed)
+                }
+                item is TranscriptItem.ToolResultRow && item.key in consumed -> null
+                else -> item
+            }
         }
     }
 
@@ -497,10 +682,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             }.onSuccess { events ->
                 _state.update { current ->
                     val live = current.conversation ?: return@update current
-                    val merged = (live.items + events.map(::toItem))
-                        .associateBy { it.key }
-                        .values
-                        .sortedBy(::seqOf)
+                    val merged = pairToolResults(
+                        (live.items + events.map(::toItem))
+                            .associateBy { it.key }
+                            .values
+                            .sortedBy(::seqOf),
+                    )
                     // throughSeq stays the newest bound; hasMore now describes
                     // whether another newer-than-`oldest` page exists behind us.
                     current.copy(conversation = live.copy(items = merged, hasMore = events.isNotEmpty()))
