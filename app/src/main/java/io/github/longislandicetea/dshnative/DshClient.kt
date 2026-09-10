@@ -90,6 +90,13 @@ class DshClient(
     @Volatile
     private var generation = 0
 
+    /**
+     * Guards the live stream table and the socket reference that goes with it.
+     * `onMessage` mutates the table from an OkHttp callback thread while
+     * `openStream` mutates it from a coroutine, and it is a plain HashMap.
+     */
+    private val streamLock = Any()
+
     private var muxJob: Job? = null
 
     fun start() {
@@ -130,11 +137,13 @@ class DshClient(
         val live = HashMap<String, Channel<MuxFrame>>()
 
         fun finish(cause: Throwable?) {
-            live.values.forEach { it.close(cause) }
-            live.clear()
-            if (activeStreams === live) {
-                activeStreams = null
-                activeSocket = null
+            synchronized(streamLock) {
+                live.values.forEach { it.close(cause) }
+                live.clear()
+                if (activeStreams === live) {
+                    activeStreams = null
+                    activeSocket = null
+                }
             }
             if (cont.isActive) {
                 if (cause == null) cont.resume(Unit) else cont.resumeWithException(cause)
@@ -147,8 +156,10 @@ class DshClient(
                 // Publish the stream table only once the socket can carry frames,
                 // so a stream can never be registered against a dead generation.
                 if (myGeneration == generation) {
-                    activeSocket = webSocket
-                    activeStreams = live
+                    synchronized(streamLock) {
+                        activeSocket = webSocket
+                        activeStreams = live
+                    }
                     _connected.value = true
                     log("mux connected (${endpoint.wsUrl})")
                 } else {
@@ -159,8 +170,10 @@ class DshClient(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (myGeneration != generation) return
                 val frame = MuxFrames.parse(text) ?: return
-                live[frame.streamId]?.trySend(frame)
-                if (frame is MuxFrame.End || frame is MuxFrame.Failure) live.remove(frame.streamId)
+                synchronized(streamLock) {
+                    live[frame.streamId]?.trySend(frame)
+                    if (frame is MuxFrame.End || frame is MuxFrame.Failure) live.remove(frame.streamId)
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -310,17 +323,25 @@ class DshClient(
     private fun openStream(endpointName: String, args: JsonObject): Flow<MuxFrame> = callbackFlow {
         val streamId = UUID.randomUUID().toString()
         val channel = Channel<MuxFrame>(capacity = 128)
-        val table = activeStreams
-        val socket = activeSocket
-        if (table == null || socket == null) {
+        // Register before sending: otherwise a snapshot that arrives during the
+        // send has no channel to land in and the conversation opens empty.
+        val paired = synchronized(streamLock) {
+            val table = activeStreams
+            val socket = activeSocket
+            if (table == null || socket == null) null else {
+                table[streamId] = channel
+                table to socket
+            }
+        }
+        if (paired == null) {
             close(DshException("mux is not connected yet; retry once the banner clears"))
             return@callbackFlow
         }
-        table[streamId] = channel
+        val (table, socket) = paired
 
         val opened = socket.send(openFrame(streamId, endpointName, args))
         if (!opened) {
-            table.remove(streamId)
+            synchronized(streamLock) { table.remove(streamId) }
             close(DshException("mux send failed"))
             return@callbackFlow
         }
@@ -335,7 +356,7 @@ class DshClient(
 
         awaitClose {
             pump.cancel()
-            table.remove(streamId)
+            synchronized(streamLock) { table.remove(streamId) }
             runCatching { socket.send("{\"type\":\"cancel\",\"streamId\":\"$streamId\"}") }
         }
     }

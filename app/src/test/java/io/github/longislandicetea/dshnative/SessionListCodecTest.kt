@@ -73,6 +73,8 @@ class SessionListCodecTest {
     @Test
     fun `falls back to the id tail when a session has no title`() {
         val value = DshWire.json.parseToJsonElement("""{"items":[{"sessionId":"session-abcdef123456"}]}""")
-        assertEquals("abcdef123456", SessionListCodec.parse(value).single().title)
+        // takeLast(8) of "session-abcdef123456" is "ef123456"; the assertion is
+        // the last eight characters, not the part of the id that looks nice.
+        assertEquals("ef123456", SessionListCodec.parse(value).single().title)
     }
 }
