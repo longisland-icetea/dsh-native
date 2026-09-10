@@ -221,9 +221,8 @@ class DshClient(
         val response = http.newCall(request).await()
         response.use {
             if (!it.isSuccessful) throw DshException("$method: HTTP ${it.code}")
-            val text = it.body?.string() ?: throw DshException("$method: empty body")
-            // OkHttp advertises gzip and decodes it transparently, so `text` is
-            // already plain JSON here; no manual gunzip is needed or wanted.
+            val raw = it.body?.bytes() ?: throw DshException("$method: empty body")
+            val text = decodeBody(raw).toString(Charsets.UTF_8)
             val parsed = json.decodeFromString<RpcResponse>(text)
             if (parsed.rpcId != rpcId) throw DshException("$method: rpcId mismatch")
             val result = parsed.result
@@ -277,7 +276,8 @@ class DshClient(
         val response = http.newCall(request).await()
         response.use {
             if (!it.isSuccessful) throw DshException("$method: HTTP ${it.code}")
-            return it.body?.bytes() ?: throw DshException("$method: empty body")
+            val raw = it.body?.bytes() ?: throw DshException("$method: empty body")
+            return decodeBody(raw)
         }
     }
 
@@ -306,6 +306,24 @@ class DshClient(
     }
 
     // ── streams ───────────────────────────────────────────────────────────────
+
+    /**
+     * Decode a response body, gunzipping it when it is still compressed.
+     *
+     * OkHttp advertises gzip and normally decodes transparently, so the usual
+     * path is a plain pass-through. A body that still starts with the gzip
+     * magic number means that did not happen (an intermediary stripped
+     * `Content-Encoding`, a cached response, or a negotiation quirk), and
+     * handing compressed bytes to a JSON parser is exactly the failure this
+     * client kept hitting. Decompressing here costs one branch and removes the
+     * whole class of failure.
+     */
+    private fun decodeBody(raw: ByteArray): ByteArray {
+        if (raw.size < 2 || raw[0] != 0x1f.toByte() || raw[1] != 0x8b.toByte()) return raw
+        return runCatching {
+            java.util.zip.GZIPInputStream(raw.inputStream()).use { it.readBytes() }
+        }.getOrElse { raw }
+    }
 
     /**
      * Follow one session: the first frame is a snapshot carrying `cursor` plus
