@@ -28,6 +28,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -168,6 +170,16 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                             )
+                            // Pending interactions are global: an agent waiting in
+                            // another session must not be invisible from here.
+                            if (state.pending.isNotEmpty()) {
+                                Text(
+                                    text = "${state.pending.size} waiting for you",
+                                    color = WARN,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
                             Text(
                                 text = endpoint?.let { point ->
                                     if (state.connected) "connected · ${point.host}"
@@ -179,6 +191,32 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                         }
                     },
                     actions = {
+                        if (state.pending.isNotEmpty()) {
+                            IconButton(onClick = {
+                                // Jump to the session that is waiting, if it is not
+                                // the one already open.
+                                val waiting = state.pending.first()
+                                if (state.conversation?.sessionId != waiting.sessionId) {
+                                    state.sessions.firstOrNull { it.sessionId == waiting.sessionId }
+                                        ?.let(holder::openSession)
+                                }
+                            }) {
+                                Icon(Icons.Filled.Notifications, contentDescription = "Waiting", tint = WARN)
+                            }
+                        }
+                        if (state.pending.isNotEmpty()) {
+                            IconButton(onClick = {
+                                // Jump to the session that is waiting when it is not
+                                // the one already open.
+                                val waiting = state.pending.first()
+                                if (state.conversation?.sessionId != waiting.sessionId) {
+                                    state.sessions.firstOrNull { it.sessionId == waiting.sessionId }
+                                        ?.let(holder::openSession)
+                                }
+                            }) {
+                                Icon(Icons.Filled.Notifications, contentDescription = "Waiting", tint = WARN)
+                            }
+                        }
                         if (state.conversation?.running == true) {
                             IconButton(onClick = holder::cancel) {
                                 Icon(Icons.Filled.Stop, contentDescription = "Cancel turn")

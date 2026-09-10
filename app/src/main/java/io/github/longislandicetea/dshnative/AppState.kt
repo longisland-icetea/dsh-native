@@ -94,11 +94,11 @@ data class PendingInteraction(
                 // answer is a structured batch keyed by question id, not a
                 // single decision string.
                 "user-questions/request" -> {
+                    // Decode the whole request: it IS the QuestionRequest. Feeding
+                    // its `questions` array to that serializer fails, because the
+                    // serializer expects the object that contains the field.
                     val questions = runCatching {
-                        DshWire.json.decodeFromJsonElement(
-                            QuestionRequest.serializer(),
-                            (request["questions"] ?: JsonNull),
-                        ).questions
+                        DshWire.json.decodeFromJsonElement(QuestionRequest.serializer(), request).questions
                     }.getOrDefault(emptyList())
                     if (questions.isEmpty()) null else PendingInteraction(
                         sessionId = event.agentId,
@@ -389,7 +389,10 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                                 if (pending == null) {
                                     // Not something this client can present; let
                                     // the Host fall through instead of hanging.
-                                    record("declining unsupported waterfall ${host.event}")
+                                    record(
+                                        "declining unsupported waterfall ${host.event}; " +
+                                            "request=${host.request.toString().take(320)}",
+                                    )
                                     eventClientId?.let { id ->
                                         runCatching { active.delegateWaterfall(id, host.eventId) }
                                     }
