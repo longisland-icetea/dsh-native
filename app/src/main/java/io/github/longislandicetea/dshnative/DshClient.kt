@@ -245,16 +245,23 @@ class DshClient(
     suspend fun listSessionsDetailed(): Pair<List<SessionSummary>, Int> {
         val body = callRaw("session/list", buildJsonObject { put("_request", buildJsonObject { }) })
         val text = body.toString(Charsets.UTF_8)
+        // Report the leading bytes in hex as well: the difference between
+        // "an envelope this client mis-parses" and "compressed bytes that were
+        // never decoded" is 1f 8b, and the summary line alone cannot show it.
+        val head = body.take(16).joinToString(" ") { "%02x".format(it) }
         val parsed = runCatching { json.decodeFromString<RpcResponse>(text) }
             .getOrElse { error ->
-                throw DshException("session/list body is not the expected envelope (${body.size}B): ${text.take(120)}", error)
+                throw DshException(
+                    "session/list envelope decode failed (${body.size}B, head=[$head], text=${text.take(80)}): ${error.message}",
+                    error,
+                )
             }
         val result = parsed.result
         if (!result.ok) throw DshException("session/list refused: ${result.error}")
         val value = result.value ?: throw DshException("session/list returned no value")
         val sessions = SessionListCodec.parse(value)
         if (sessions.isEmpty()) {
-            throw DshException("session/list decoded 0 items from ${body.size}B: ${text.take(120)}")
+            throw DshException("session/list decoded 0 items from ${body.size}B (head=[$head]): ${text.take(80)}")
         }
         return sessions to body.size
     }
