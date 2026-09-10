@@ -119,17 +119,10 @@ JARS="$(tr '\n' ' ' < "$M2/classpath.txt")"
 # ── 5. package + sign ────────────────────────────────────────────────────────
 echo "== package"
 cp "$OUT/base.apk" "$OUT/unsigned.apk"
-# `zip` is not installed on this host, and an APK is just a zip: add the dex
-# entries with Python's zipfile, deflating them like the toolchain does.
-python3 - "$OUT/unsigned.apk" "$OUT/dex" <<'PYEOF'
-import os, sys, zipfile
-apk, dexdir = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(apk, "a", zipfile.ZIP_DEFLATED) as z:
-    for name in sorted(os.listdir(dexdir)):
-        if name.endswith(".dex"):
-            z.write(os.path.join(dexdir, name), name)
-print("   dex entries added:", sorted(n for n in zipfile.ZipFile(apk).namelist() if n.endswith(".dex")))
-PYEOF
+# -X drops the extra file attributes an APK does not want; the entry names must
+# be exactly classes.dex, classes2.dex, ... at the archive root.
+( cd "$OUT/dex" && zip -q -X "$OUT/unsigned.apk" ./*.dex )
+
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
 if [ ! -f "$KEYSTORE" ]; then
