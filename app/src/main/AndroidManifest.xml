@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<!-- The `package` attribute is required by aapt2. Gradle injects it from the
+     `namespace` DSL, but the Gradle-free build (tools/build.sh) invokes aapt2
+     directly, so it is stated here and kept equal to the namespace. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.longislandicetea.dshnative">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
