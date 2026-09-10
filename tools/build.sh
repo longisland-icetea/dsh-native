@@ -71,11 +71,18 @@ echo "   library res trees: $(( ${#TREES[@]} - 1 ))"
 "$BT/aapt2" compile --dir "$STAGE" -o "$OUT/res.zip"
 
 echo "== aapt2 link"
+# Library R classes are generated, not shipped: the aars in this graph contain
+# no R.class at all (verified), so aapt2 has to emit one per library package or
+# compiled library code fails at runtime with NoClassDefFoundError on
+# e.g. androidx.customview.poolingcontainer.R$id -- which is exactly how the
+# first working APK died inside Compose's setContent.
+SYMBOLS="$OUT/R.txt"
 "$BT/aapt2" link \
   -o "$OUT/base.apk" \
   -I "$ANDROID_JAR" \
   --manifest "$ROOT/app/src/main/AndroidManifest.xml" \
   --java "$OUT/gen" \
+  --output-text-symbols "$SYMBOLS" \
   --min-sdk-version 29 \
   --target-sdk-version 36 \
   --version-code 1 --version-name 0.1.0 \
@@ -83,6 +90,12 @@ echo "== aapt2 link"
 
 # ── 2. R.java ────────────────────────────────────────────────────────────────
 echo "== javac R.java"
+# Library R classes: the aars ship none, so they are generated from the symbol
+# dump. Without them compiled library code fails at runtime on its own R.
+if [ -f "$M2/lib-packages.txt" ] && [ -f "$SYMBOLS" ]; then
+  tr ',' '\n' < "$M2/lib-packages.txt" > "$OUT/lib-packages.txt"
+  python3 "$ROOT/tools/gen-r.py" "$SYMBOLS" "$OUT/gen" $(cat "$OUT/lib-packages.txt")
+fi
 if compgen -G "$OUT/gen/**/R.java" >/dev/null || [ -n "$(find "$OUT/gen" -name R.java -print -quit)" ]; then
   find "$OUT/gen" -name "*.java" > "$OUT/rjava.list"
   javac -source 17 -target 17 -nowarn -classpath "$ANDROID_JAR" -d "$OUT/classes" @"$OUT/rjava.list"

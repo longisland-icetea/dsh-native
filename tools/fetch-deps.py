@@ -27,8 +27,9 @@ SKIP_GROUPS = {"com.google.guava"}
 # variant-aware resolution picks one of the pair; this walker would dex both and
 # d8 rejects duplicate classes. Each entry is justified by an observed clash:
 #   collection-ktx vs collection-jvm  -> androidx.collection.ArraySetKt
-#   core-ktx is likewise folded into core, and the -jvm artifact is the KMP
-#   variant that duplicates the Android one.
+#   Note that core-ktx is deliberately NOT dropped: unlike the others it carries
+#   unique Kotlin extensions (androidx.core.view.ViewKt) that core does not, and
+#   removing it made Compose's ViewCompositionStrategy fail at runtime.
 SKIP_ARTIFACTS = {
     "androidx.collection:collection-ktx",
     "androidx.core:core-ktx",
@@ -181,7 +182,6 @@ def main():
     # Each name is here because dexing failed on a duplicate class it caused.
     DROP_ARTIFACTS = {
         "collection-ktx",
-        "core-ktx",
         "activity-ktx",
         "lifecycle-runtime-ktx",
         "lifecycle-viewmodel-ktx",
