@@ -277,6 +277,14 @@ data class SessionGroup(
     val path: String?,
     val sessions: List<SessionSummary>,
     val expanded: Boolean,
+    /**
+     * The Host Workspace this group came from, when it came from one.
+     *
+     * A new session is created against a workspace id rather than a path: the
+     * Host refuses `workspaceId` and `cwd` together, and only the workspace route
+     * makes the session a member of the group it was created from.
+     */
+    val workspaceId: String? = null,
 ) {
     val newestAt: Long get() = sessions.maxOfOrNull { it.updatedAt } ?: 0L
     companion object {
@@ -320,6 +328,7 @@ data class SessionGroup(
                     path = workspace.path,
                     sessions = members,
                     expanded = !collapsed.contains(workspace.workspaceId),
+                    workspaceId = workspace.workspaceId,
                 )
             }
             val stray = sessions.filter { it.sessionId !in accounted && visible(it) }
@@ -859,6 +868,43 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
 
     fun dismissPreview() {
         _state.update { it.copy(preview = null, previewLoading = null) }
+    }
+
+    /**
+     * Start a new session, optionally inside one Workspace.
+     *
+     * The Host answers with the new id, so the app never guesses it: it opens
+     * immediately and the follow stream supplies the (empty) transcript. The list
+     * is refreshed in the background because the new session is `blank` until its
+     * first turn, and a blank session is exactly the one the drawer should show
+     * as current.
+     */
+    fun createSession(workspaceId: String? = null, onCreated: (String) -> Unit = {}) {
+        val active = client ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.createSession(workspaceId) }
+                .onSuccess { sessionId ->
+                    record("created session ${sessionId.take(20)}${workspaceId?.let { " in $it" } ?: ""}")
+                    _state.update {
+                        it.copy(
+                            conversation = Conversation(
+                                sessionId = sessionId,
+                                title = "",
+                                workspaceRoot = _state.value.workspaces
+                                    .firstOrNull { view -> view.workspaceId == workspaceId }
+                                    ?.path,
+                            ),
+                        )
+                    }
+                    onCreated(sessionId)
+                    refreshSessions()
+                    // A brand-new session has no selection of its own, so the
+                    // picker needs the catalog to name the default it is running.
+                    loadCatalog()
+                    openFollow(sessionId, "")
+                }
+                .onFailure { record("create session failed: ${it.message}") }
+        }
     }
 
     fun closeSession() {

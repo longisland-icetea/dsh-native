@@ -433,6 +433,31 @@ class DshClient(
         return android.util.Base64.decode(data, android.util.Base64.DEFAULT)
     }
 
+    /**
+     * Create a session and return its id.
+     *
+     * `workspaceId` and `cwd` are alternatives, not a pair: sending both is
+     * rejected with `gateway/bad-request`, and a workspace id already implies the
+     * directory. An empty request creates the session in the process default
+     * directory.
+     */
+    suspend fun createSession(workspaceId: String?): String {
+        val args = buildJsonObject {
+            // The descriptor declares `request` required, so it is always sent,
+            // possibly empty.
+            put(
+                "request",
+                buildJsonObject {
+                    workspaceId?.let { put("workspaceId", JsonPrimitive(it)) }
+                },
+            )
+        }
+        val value = call("session/create", args)
+        val obj = value as? JsonObject ?: throw DshException("session/create: unexpected result")
+        return obj["sessionId"]?.jsonPrimitive?.contentOrNull
+            ?: throw DshException("session/create: no sessionId in result")
+    }
+
     suspend fun modelCatalog(): ModelCatalog {
         // The descriptor declares no parameters; sending a `request` field is
         // rejected with gateway/arguments-invalid.

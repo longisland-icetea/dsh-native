@@ -46,3 +46,8 @@ Gradle and builds a debug APK.
   it.
 - **The Host owns workspace grouping and the archive set**; the client only
   renders what `workspace/follow` reports. There is no unarchive API.
+- **`session/create` takes `workspaceId` or `cwd`, never both** (the Host answers
+  `gateway/bad-request`), and only the workspace route makes the new session a
+  member of the group it was created from. The `request` field is required even
+  when empty, and the new session is `blank` until its first turn — which is what
+  `session/list` uses to decide whether a blank session may be shown.

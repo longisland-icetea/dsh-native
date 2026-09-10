@@ -148,7 +148,9 @@ private fun ModelPickerDialog(
     onCompact: () -> Unit,
 ) {
     val catalog = state.catalog
-    val current = state.selection
+    // A session nobody has switched a model in runs the Host default, which the
+    // catalog reports; without this fallback the picker shows nothing selected.
+    val current = state.selection ?: catalog?.default
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Model", fontSize = 16.sp) },
@@ -532,6 +534,10 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                     onRefresh = holder::refreshSessions,
                     onToggleGroup = holder::toggleGroup,
                     onArchive = holder::archive,
+                    onNewSession = { workspaceId ->
+                        holder.createSession(workspaceId)
+                        scope.launch { drawerState.close() }
+                    },
                 )
             }
         },
@@ -580,7 +586,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 if (state.conversation != null) {
                                     Spacer(Modifier.width(8.dp))
                                     Text(
-                                        text = selectionLabel(state.selection),
+                                        text = selectionLabel(state.selection ?: state.catalog?.default),
                                         color = ACCENT,
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,
@@ -712,6 +718,7 @@ private fun SessionDrawer(
     onRefresh: () -> Unit,
     onToggleGroup: (String) -> Unit,
     onArchive: (String) -> Unit,
+    onNewSession: (String?) -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(PANEL)) {
         Row(
@@ -736,6 +743,9 @@ private fun SessionDrawer(
                 )
             }
             TextButton(onClick = onRefresh) { Text("Refresh") }
+            // No workspace: the Host starts the session in the process default
+            // directory, which is what a "just let me type" session wants.
+            TextButton(onClick = { onNewSession(null) }) { Text("New") }
         }
         state.sessionsError?.let { message ->
             Text(
@@ -786,6 +796,23 @@ private fun SessionDrawer(
                             text = "${group.sessions.size}",
                             color = MUTED, fontSize = 10.sp,
                         )
+                        // A new session belongs in a directory: creating it from
+                        // the group header is the only way to choose one without
+                        // a directory picker, and the Host rejects workspaceId
+                        // together with cwd, so the workspace is the choice.
+                        group.workspaceId?.let { id ->
+                            Text(
+                                text = "＋",
+                                color = MUTED,
+                                fontSize = 14.sp,
+                                modifier = Modifier
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                    ) { onNewSession(id) }
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                            )
+                        }
                     }
                 }
                 if (group.expanded) {
