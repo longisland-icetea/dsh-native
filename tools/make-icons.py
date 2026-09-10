@@ -17,9 +17,9 @@ Outputs, per density:
   adaptive foreground     ic_launcher_foreground.png   (mark inside the safe zone)
   adaptive background     ic_launcher_background.png   (flat brand colour)
 
-The mark is drawn white on the DeepSeek brand blue. The source SVG is black in
-light mode and white in dark mode via a media query; an icon needs one form, and
-white-on-blue is the one that reads on both light and dark launchers.
+The mark is drawn black on white. The source SVG is black in light mode and white
+in dark mode via a media query; an icon needs one form, and the mark's interior is
+cut out rather than filled, so it reads as an outline.
 """
 
 from __future__ import annotations
@@ -37,9 +37,10 @@ SOURCE = Path(
 )
 RES = ROOT / "app/src/main/res"
 
-# Brand blue from the DeepSeek mark; the app's own palette is a dark neutral.
-BACKGROUND = (0x4D, 0x6B, 0xFE, 0xFF)
-MARK = (0xFF, 0xFF, 0xFF, 0xFF)
+# Black on white. The mark is a thin outline with holes (see `render_mark`), so it
+# needs a background it contrasts with rather than a same-colour fill.
+BACKGROUND = (0xFF, 0xFF, 0xFF, 0xFF)
+MARK = (0x00, 0x00, 0x00, 0xFF)
 
 # Android densities: mdpi is 48dp at 1x.
 DENSITIES = {
@@ -134,7 +135,7 @@ def cubic(p0, p1, p2, p3, steps: int = 24) -> list[tuple[float, float]]:
     return out
 
 
-def render_mark(size: int) -> Image.Image:
+def render_mark(size: int, color: tuple[int, int, int, int] = MARK) -> Image.Image:
     """The mark alone, white on transparent, fitted into a square of `size`."""
     svg = SOURCE.read_text()
     view = re.search(r'viewBox="([^"]+)"', svg)
@@ -152,20 +153,25 @@ def render_mark(size: int) -> Image.Image:
         for polygon in parse_path(path.group(1))
     ]
 
-    # Each subpath is rasterised on its own and the results are unioned, which is
-    # SVG's default `nonzero` fill: the mark's features are separate closed
-    # shapes, not holes. Feeding every subpath to one `polygon()` call instead
-    # paints a bridge between them and loses the tail.
+    # Even-odd fill, which is what the source needs: the mark is an outline with
+    # three subpaths that lie *inside* it (an eye and two fin notches). Filling by
+    # union -- SVG's `nonzero` default, and the first thing tried here -- paints
+    # the whole silhouette solid and loses every internal contour.
+    #
+    # Parity is counted properly rather than approximated by XORing antialiased
+    # pieces: XOR of two pixels that are each half covered gives a covered pixel,
+    # so the holes came out stippled instead of clean.
     layer = Image.new("L", (big, big), 0)
     for polygon in polygons:
         piece = Image.new("L", (big, big), 0)
-        ImageDraw.Draw(piece).polygon(polygon, fill=255)
+        ImageDraw.Draw(piece).polygon(polygon, fill=1)
         layer = Image.frombytes(
-            "L", (big, big), bytes(max(a, b) for a, b in zip(layer.tobytes(), piece.tobytes()))
+            "L", (big, big), bytes(
+                ((a + b) & 1) * 255 for a, b in zip(layer.tobytes(), piece.tobytes())
+            )
         )
     mark = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    mark.putalpha(layer)
-    mark.paste(MARK, (0, 0), layer)
+    mark.paste(color, (0, 0), layer)
     return mark.resize((size, size), Image.LANCZOS)
 
 
@@ -177,11 +183,11 @@ def square_icon(px: int) -> Image.Image:
     return icon
 
 
-def adaptive_foreground(px: int) -> Image.Image:
+def adaptive_foreground(px: int, color: tuple[int, int, int, int] = MARK) -> Image.Image:
     """The adaptive foreground: the mark inside the guaranteed-visible zone."""
     layer = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     mark_px = round(px * MARK_DP / ADAPTIVE_DP)
-    layer.alpha_composite(render_mark(mark_px), ((px - mark_px) // 2, (px - mark_px) // 2))
+    layer.alpha_composite(render_mark(mark_px, color), ((px - mark_px) // 2, (px - mark_px) // 2))
     return layer
 
 
@@ -199,6 +205,11 @@ def main() -> None:
 
         adaptive = round(ADAPTIVE_DP * factor)
         adaptive_foreground(adaptive).save(folder / "ic_launcher_foreground.png")
+        # The monochrome layer is the same shape in white: on API 33+ a themed
+        # launcher takes the alpha channel and tints it itself.
+        adaptive_foreground(adaptive, color=(0xFF, 0xFF, 0xFF, 0xFF)).save(
+            folder / "ic_launcher_monochrome.png"
+        )
         Image.new("RGBA", (adaptive, adaptive), BACKGROUND).save(
             folder / "ic_launcher_background.png"
         )
