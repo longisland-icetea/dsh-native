@@ -385,6 +385,8 @@ class DshClient(
      * closes the channel so the collector can decide to re-open.
      */
     private fun openStream(endpointName: String, args: JsonObject): Flow<MuxFrame> = callbackFlow {
+        // The socket send and the channel pump must not run on the main thread
+        // (Android throws NetworkOnMainThreadException on socket I/O).
         val streamId = UUID.randomUUID().toString()
         val channel = Channel<MuxFrame>(capacity = 128)
         // Register before sending: otherwise a snapshot that arrives during the

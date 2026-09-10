@@ -1,7 +1,9 @@
 package io.github.longislandicetea.dshnative
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,7 +70,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
         _state.update { it.copy(endpoint = endpoint) }
         created.start()
 
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             created.connected.collect { alive ->
                 _state.update { it.copy(connected = alive) }
                 // Bounce the conversation stream through every reconnect so the
@@ -77,7 +79,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
                 if (alive && conversation != null) openFollow(conversation.sessionId, conversation.title)
             }
         }
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             created.log.collect { line -> record(line) }
         }
         refreshSessions()
@@ -98,7 +100,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
             record("refresh skipped: no client yet")
             return
         }
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             _state.update { it.copy(sessionsError = null) }
             runCatching { active.listSessionsDetailed() }
                 .onSuccess { (sessions, bytes) ->
@@ -140,7 +142,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
     private fun openFollow(sessionId: String, title: String) {
         val active = client ?: return
         followJob?.cancel()
-        followJob = scope.launch {
+        followJob = scope.launch(Dispatchers.IO) {
             active.follow(sessionId)
                 .catch { error ->
                     _state.update { current ->
@@ -228,7 +230,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
         if (!conversation.hasMore || conversation.items.isEmpty()) return
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             val oldest = conversation.items.minOfOrNull(::seqOf) ?: return@launch
             if (oldest == Long.MAX_VALUE) return@launch
             runCatching {
@@ -256,7 +258,7 @@ class AppStateHolder(private val scope: CoroutineScope) {
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
         if (text.isBlank()) return
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             _state.update { it.copy(busy = true) }
             runCatching { active.prompt(conversation.sessionId, text) }
                 .onFailure { error ->
@@ -272,6 +274,6 @@ class AppStateHolder(private val scope: CoroutineScope) {
     fun cancel() {
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
-        scope.launch { runCatching { active.cancel(conversation.sessionId) } }
+        scope.launch(Dispatchers.IO) { runCatching { active.cancel(conversation.sessionId) } }
     }
 }
