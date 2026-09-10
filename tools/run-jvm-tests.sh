@@ -46,8 +46,11 @@ echo "== compile test sources"
 find "$ROOT/app/src/test/java" -name '*.kt' > "$OUT/test.list"
 # Test resources (the live session/list capture) must be on the test classpath
 # the same way Gradle puts them there.
+# `-Xfriend-paths` is how Gradle makes `internal` visible to the test source set;
+# without it a test cannot reach a helper that is deliberately not public API.
 "$KOTLINC" -classpath "$CP:$OUT/main:$OUT/stub" -jvm-target 17 -nowarn \
   -Xplugin="$SERIALIZATION_PLUGIN" \
+  -Xfriend-paths="$OUT/main" \
   -d "$OUT/test" @"$OUT/test.list"
 
 echo "== compile runner"

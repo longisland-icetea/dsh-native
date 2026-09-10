@@ -360,6 +360,8 @@ data class AppState(
     /** Group keys (cwd) the user collapsed. */
     val collapsed: Set<String> = emptySet(),
     val showArchived: Boolean = false,
+    /** Whether the drawer's transport-log panel is shown. Off by default. */
+    val showLog: Boolean = false,
     /** Routable models, loaded when the picker first opens. */
     val catalog: ModelCatalog? = null,
     /** Provider/model/effort currently in force for the open conversation. */
@@ -417,9 +419,11 @@ private class SessionViewStore(context: android.content.Context) {
 
     fun collapsed(): Set<String> = prefs.getStringSet("collapsed", emptySet()) ?: emptySet()
     fun showArchived(): Boolean = prefs.getBoolean("showArchived", false)
+    fun showLog(): Boolean = prefs.getBoolean("showLog", false)
 
     fun saveCollapsed(value: Set<String>) = prefs.edit().putStringSet("collapsed", value).apply()
     fun saveShowArchived(value: Boolean) = prefs.edit().putBoolean("showArchived", value).apply()
+    fun saveShowLog(value: Boolean) = prefs.edit().putBoolean("showLog", value).apply()
 }
 
 class AppStateHolder(private val scope: CoroutineScope, context: android.content.Context? = null) {
@@ -430,6 +434,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // Archived sessions are hidden unless asked for; the switch lives in
             // settings and this is its default, not its remembered value.
             showArchived = false,
+            // The transport log is off by default: it is a debugging aid, and it
+            // pushes the session list up the drawer whenever it is on.
+            showLog = viewStore?.showLog() ?: false,
         ),
     )
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -445,6 +452,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     fun setShowArchived(value: Boolean) {
         viewStore?.saveShowArchived(value)
         _state.update { it.copy(showArchived = value) }
+    }
+
+    fun setShowLog(value: Boolean) {
+        viewStore?.saveShowLog(value)
+        _state.update { it.copy(showLog = value) }
     }
 
     private var client: DshClient? = null

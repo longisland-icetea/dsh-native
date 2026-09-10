@@ -7,6 +7,9 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -60,6 +63,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -70,6 +74,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -79,6 +88,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -226,7 +236,12 @@ private fun ModelPickerDialog(
 
 /** A tap-opened preview of one deliverable, read through the Host. */
 @Composable
-private fun FilePreviewDialog(preview: FilePreview?, loading: String?, onDismiss: () -> Unit) {
+private fun FilePreviewDialog(
+    preview: FilePreview?,
+    loading: String?,
+    onDismiss: () -> Unit,
+    onZoom: (FilePreview.Bitmap) -> Unit,
+) {
     if (preview == null && loading == null) return
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -255,7 +270,7 @@ private fun FilePreviewDialog(preview: FilePreview?, loading: String?, onDismiss
             }
             when (preview) {
                 is FilePreview.Failed -> Text(preview.reason, color = WARN, fontSize = 12.sp)
-                is FilePreview.Bitmap -> ImagePreview(preview)
+                is FilePreview.Bitmap -> ImagePreview(preview) { onZoom(preview) }
                 is FilePreview.Text -> {
                     val body = preview.body
                     if (body.isEmpty()) {
@@ -277,7 +292,15 @@ private fun FilePreviewDialog(preview: FilePreview?, loading: String?, onDismiss
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        confirmButton = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val bitmap = preview as? FilePreview.Bitmap
+                if (bitmap != null && bitmap.mime != null) {
+                    TextButton(onClick = { onZoom(bitmap) }) { Text("Zoom") }
+                }
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
         containerColor = PANEL,
     )
 }
@@ -294,7 +317,7 @@ private fun FilePreviewDialog(preview: FilePreview?, loading: String?, onDismiss
  * with it. Beyond the cap the sheet reports the size instead of trying.
  */
 @Composable
-private fun ImagePreview(preview: FilePreview.Bitmap) {
+private fun ImagePreview(preview: FilePreview.Bitmap, onZoom: () -> Unit) {
     val maxBytes = 12L * 1024 * 1024
     if (preview.mime == null || preview.bytes.size.toLong() > maxBytes) {
         Text(
@@ -324,17 +347,143 @@ private fun ImagePreview(preview: FilePreview.Bitmap) {
             androidx.compose.foundation.Image(
                 bitmap = image.asImageBitmap(),
                 contentDescription = preview.path.substringAfterLast('/'),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onZoom() },
                 contentScale = ContentScale.Fit,
             )
             Text(
-                text = "${image.width}×${image.height} · %.0f KB".format(preview.bytes.size / 1024.0),
+                text = "${image.width}×${image.height} · %.0f KB · tap to zoom".format(preview.bytes.size / 1024.0),
                 color = MUTED,
                 fontSize = 10.sp,
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
     }
+}
+
+/**
+ * A figure, full screen, pinch-to-zoom and draggable.
+ *
+ * A phone screen cannot show a 1817x1596 figure legibly, so the useful gesture is
+ * "make this bigger and move it" rather than "fit it". Scale is clamped to
+ * [1, 8]: below 1 the figure floats in empty space, above 8 the bitmap turns to
+ * mush. Panning is clamped to the scaled image bounds so the figure cannot be
+ * dragged off-screen and lost.
+ *
+ * Built on `transformable` + `detectTapGestures` rather than a scrollable
+ * container: a scroll container would fight the pinch for the same pointers, and
+ * the transcript behind this already scrolls.
+ */
+@Composable
+private fun ImageZoomViewer(preview: FilePreview.Bitmap, onDismiss: () -> Unit) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, preview.path) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                android.graphics.BitmapFactory.decodeByteArray(preview.bytes, 0, preview.bytes.size)
+            }.getOrNull()
+        }
+    }
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    var boxSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+
+    val transformable = rememberTransformableState { zoomChange, panChange, _ ->
+        scale = clampScale(scale * zoomChange)
+        offset = clampOffset(offset + panChange, scale, boxSize.width, boxSize.height)
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0xFF05070A))
+                .onSizeChanged { boxSize = it }
+                .transformable(transformable)
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        // Double tap toggles between fit and a useful working zoom,
+                        // because pinching to an exact factor on a phone is fiddly.
+                        onDoubleTap = {
+                            if (scale > IMAGE_MIN_SCALE + 0.05f) {
+                                scale = IMAGE_MIN_SCALE
+                                offset = androidx.compose.ui.geometry.Offset.Zero
+                            } else {
+                                scale = IMAGE_DOUBLE_TAP_SCALE
+                            }
+                        },
+                        onTap = { onDismiss() },
+                    )
+                },
+        ) {
+            val image = bitmap
+            if (image == null) {
+                Text("decoding…", color = MUTED, fontSize = 12.sp, modifier = Modifier.align(Alignment.Center))
+            } else {
+                androidx.compose.foundation.Image(
+                    bitmap = image.asImageBitmap(),
+                    contentDescription = preview.path.substringAfterLast('/'),
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        },
+                )
+            }
+            Text(
+                text = "${(scale * 100).roundToInt()}% · double-tap to reset · tap to close",
+                color = Color(0xFF6C7484),
+                fontSize = 10.sp,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp),
+            )
+        }
+    }
+}
+
+/** The zoom range: below 1 the figure floats in space, above this it is mush. */
+internal const val IMAGE_MIN_SCALE = 1f
+internal const val IMAGE_MAX_SCALE = 8f
+
+/** The working zoom a double tap lands on, since pinching to an exact factor is fiddly. */
+internal const val IMAGE_DOUBLE_TAP_SCALE = 3f
+
+internal fun clampScale(scale: Float): Float =
+    scale.coerceIn(IMAGE_MIN_SCALE, IMAGE_MAX_SCALE)
+
+/**
+ * Keep the scaled image covering the viewport where it can.
+ *
+ * The image is fitted, so at scale 1 it matches the viewport on one axis and
+ * leaves margin on the other; that margin is part of the allowed range. Without
+ * this the figure can be flung out of view with no way back except a reset.
+ *
+ * Pure and internal so the arithmetic can be tested: a gesture cannot be injected
+ * from a shell, but the bounds it depends on can be checked directly.
+ */
+internal fun clampOffset(
+    offset: androidx.compose.ui.geometry.Offset,
+    scale: Float,
+    width: Int,
+    height: Int,
+): androidx.compose.ui.geometry.Offset {
+    if (width <= 0 || height <= 0) return androidx.compose.ui.geometry.Offset.Zero
+    // At fit there is no range to clamp into. Returning early also avoids
+    // `coerceIn(-0.0f, 0.0f)`, which normalises -0.0f to +0.0f and makes the
+    // result unequal to the offset that produced it.
+    if (scale <= IMAGE_MIN_SCALE) return androidx.compose.ui.geometry.Offset.Zero
+    val maxX = (width * (scale - 1f)) / 2f
+    val maxY = (height * (scale - 1f)) / 2f
+    return androidx.compose.ui.geometry.Offset(
+        offset.x.coerceIn(-maxX, maxX),
+        offset.y.coerceIn(-maxY, maxY),
+    )
 }
 
 /** Last-used endpoint, so a restart does not ask again. */
@@ -358,6 +507,9 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     val scope = rememberCoroutineScope()
     var showSettings by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
+    // The full-screen zoom target. Held here rather than in AppState: it is a
+    // property of this device's screen, not of the session.
+    var zoomed by remember { mutableStateOf<FilePreview.Bitmap?>(null) }
     val saved = remember { EndpointStore.load(context) }
     // A delegated property cannot be smart-cast, so read it once per recomposition.
     val endpoint = state.endpoint
@@ -486,8 +638,14 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     }
 
     if (state.preview != null || state.previewLoading != null) {
-        FilePreviewDialog(state.preview, state.previewLoading, holder::dismissPreview)
+        FilePreviewDialog(
+            preview = state.preview,
+            loading = state.previewLoading,
+            onDismiss = holder::dismissPreview,
+            onZoom = { zoomed = it },
+        )
     }
+    zoomed?.let { ImageZoomViewer(it, onDismiss = { zoomed = null }) }
 
     if (showModels) {
         ModelPickerDialog(
@@ -510,6 +668,8 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
             archivedCount = state.archived.size,
             showArchived = state.showArchived,
             onShowArchived = holder::setShowArchived,
+            showLog = state.showLog,
+            onShowLog = holder::setShowLog,
             onDismiss = { showSettings = false },
             onConnect = { text ->
                 DshEndpoint.parse(text)?.let { endpoint ->
@@ -640,7 +800,9 @@ private fun SessionDrawer(
                     }
                 }
             }
-            if (state.log.isNotEmpty()) {
+            // The log is a debugging aid, not part of the session list: it is off
+            // unless asked for and sits below the sessions when it is on.
+            if (state.showLog && state.log.isNotEmpty()) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(12.dp)) {
                         Text("LOG", color = MUTED, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
@@ -660,6 +822,8 @@ private fun ConnectionDialog(
     archivedCount: Int,
     showArchived: Boolean,
     onShowArchived: (Boolean) -> Unit,
+    showLog: Boolean,
+    onShowLog: (Boolean) -> Unit,
     onDismiss: () -> Unit,
     onConnect: (String) -> Unit,
 ) {
@@ -693,6 +857,18 @@ private fun ConnectionDialog(
                         text = "Show archived sessions ($archivedCount)",
                         fontSize = 12.sp,
                         color = if (archivedCount == 0) MUTED else Color(0xFFDDE2EC),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().clickable { onShowLog(!showLog) },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = showLog, onCheckedChange = { onShowLog(it) })
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "Show transport log in the session list",
+                        fontSize = 12.sp,
+                        color = Color(0xFFDDE2EC),
                     )
                 }
             }
