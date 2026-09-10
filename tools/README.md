@@ -13,6 +13,12 @@ Gradle orchestrates:
 | dexing | `d8` |
 | packaging | `zip`, `zipalign`, `apksigner` |
 
+## Installing
+
+With a device on adb there is no download step: `adb install --no-incremental -r
+build/dsh-native-debug.apk`. A local HTTP server was used earlier, before adb was
+available, and is not part of this flow.
+
 ## Editing hazard
 
 `tools/*.py` that patch sources use a `sub()` helper that raises when its anchor
