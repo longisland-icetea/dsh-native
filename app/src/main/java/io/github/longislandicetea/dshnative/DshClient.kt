@@ -47,36 +47,9 @@ data class DshEndpoint(val host: String, val port: Int = 3080) {
     val wsUrl get() = "ws://$host:$port${DshWire.MUX_PATH}"
 
     companion object {
-        /**
-         * Fold the punctuation a CJK keyboard substitutes for ASCII.
-         *
-         * Two blocks, because the marks that matter are not in the same one:
-         *
-         *  - `U+FF01..U+FF5E` is the full-width ASCII block, which is what a
-         *    Chinese IME emits for letters and digits;
-         *  - `U+3000..U+303F` is CJK punctuation, and it holds `。` (U+3002), the
-         *    ideographic full stop -- which is what the `.` key actually produces.
-         *    An earlier version folded only the first block, so `192。168.1.5`
-         *    kept its ideographic stops and failed at DNS.
-         */
-        internal fun normalizePunctuation(input: String): String = buildString(input.length) {
-            input.forEach { ch ->
-                append(
-                    when (ch.code) {
-                        in 0xFF01..0xFF5E -> (ch.code - 0xFEE0).toChar()
-                        // Ideographic full stop and comma are the two CJK marks that
-                        // stand in for ASCII punctuation on an address.
-                        0x3002 -> '.'
-                        0x3001 -> ','
-                        else -> ch
-                    },
-                )
-            }
-        }
-
         /** Accepts `host`, `host:port`, or a pasted URL; rejects anything but http/ws. */
         fun parse(input: String): DshEndpoint? {
-            val trimmed = normalizePunctuation(input).trim().removeSuffix("/")
+            val trimmed = input.trim().removeSuffix("/")
             if (trimmed.isEmpty()) return null
             // Whether a scheme was typed decides how to read a missing port.
             // Prepending `http://` unconditionally made a bare host resolve to

@@ -5,11 +5,11 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Endpoint parsing, including the full-width punctuation a CJK keyboard emits.
+ * Endpoint parsing.
  *
- * The case that matters is real: typing `192.168.255.5:3080` on a phone with a
- * Chinese IME stores `192。168.255.5：3080`, and the app reported "not configured"
- * with the text visibly present in the box.
+ * The address is typed by hand, so what matters is that a well-formed one lands on
+ * the harness's port: a bare host used to resolve to 80 because OkHttp reports its
+ * scheme default and the fallback never applied.
  */
 class EndpointParseTest {
     @Test
@@ -31,39 +31,6 @@ class EndpointParseTest {
         val endpoint = DshEndpoint.parse("http://192.168.1.20:3080/")
         assertEquals("192.168.1.20", endpoint?.host)
         assertEquals(3080, endpoint?.port)
-    }
-
-    @Test
-    fun `an ideographic full stop is a dot`() {
-        // `。` is U+3002, in the CJK punctuation block -- *not* in the full-width
-        // ASCII block, which is why folding only that block left the address
-        // unresolvable.
-        assertEquals("192.168.1.20", DshEndpoint.normalizePunctuation("192。168。1。20"))
-    }
-
-    @Test
-    fun `full-width punctuation parses`() {
-        // What a Chinese IME produces for `.` and `:`.
-        val endpoint = DshEndpoint.parse("192。168。255。5：3080")
-        assertEquals("192.168.255.5", endpoint?.host)
-        assertEquals(3080, endpoint?.port)
-    }
-
-    @Test
-    fun `full-width punctuation folds to ascii`() {
-        assertEquals("192.168.1.20:3080", DshEndpoint.normalizePunctuation("192。168。1。20：3080"))
-        assertEquals("192.168.1.20:3080", DshEndpoint.normalizePunctuation("192.168.1.20:3080"))
-        assertEquals("abc123", DshEndpoint.normalizePunctuation("ａｂｃ１２３"))
-    }
-
-    @Test
-    fun `a stray full-width mark is the reader's to fix`() {
-        // `；` folds to `;`, which is not a port separator, so the semicolon stays
-        // in the host and the address fails at DNS. Deliberately not compensated
-        // for: the fold handles what a keyboard emits, and guessing at anything
-        // else would paper over a typo the reader can see and correct.
-        val endpoint = DshEndpoint.parse("192.168.255.5；3080")
-        assertEquals("192.168.255.5;3080", endpoint?.host)
     }
 
     @Test
