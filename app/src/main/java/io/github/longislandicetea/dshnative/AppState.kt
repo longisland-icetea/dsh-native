@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import android.util.Log
@@ -550,6 +551,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                             }
                             is HostEvent.Cancelled ->
                                 _state.update { it.copy(pending = it.pending.filterNot { p -> p.eventId == host.eventId }) }
+                            // Everything else the Host emits is a notification. The
+                            // session-state ones keep the drawer live: without them
+                            // a session's running dot and its place in the order
+                            // only changed on a manual refresh.
+                            is HostEvent.Notify -> applySessionDelta(active, host.event, host.args)
                             else -> Unit
                         }
                     }
@@ -562,6 +568,56 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 // if it escapes here the process dies instead of retrying.
                 record("events stream aborted: ${error.message}")
             }
+        }
+    }
+
+    /**
+     * Apply one pushed session-state change to the list.
+     *
+     * `api-session/added` carries a whole summary, so it replaces the row outright;
+     * `status` and `activity` are one field each and are patched in place, which is
+     * what keeps the list live without a `session/list` round trip per event.
+     */
+    private fun applySessionDelta(active: DshClient, event: String, args: List<JsonElement>) {
+        when (val delta = SessionDelta.from(event, args)) {
+            is SessionDelta.Running -> _state.update { current ->
+                current.copy(
+                    sessions = current.sessions.map { summary ->
+                        if (summary.sessionId == delta.sessionId) {
+                            summary.copy(running = delta.running)
+                        } else {
+                            summary
+                        }
+                    },
+                )
+            }
+            is SessionDelta.Activity -> _state.update { current ->
+                current.copy(
+                    sessions = current.sessions.map { summary ->
+                        if (summary.sessionId == delta.sessionId) {
+                            summary.copy(updatedAt = delta.updatedAt)
+                        } else {
+                            summary
+                        }
+                    },
+                )
+            }
+            is SessionDelta.Added -> _state.update { current ->
+                val existing = current.sessions.any { it.sessionId == delta.session.sessionId }
+                current.copy(
+                    sessions = if (existing) {
+                        current.sessions.map {
+                            if (it.sessionId == delta.session.sessionId) delta.session else it
+                        }
+                    } else {
+                        current.sessions + delta.session
+                    },
+                )
+            }
+            is SessionDelta.Removed -> _state.update { current ->
+                current.copy(sessions = current.sessions.filterNot { it.sessionId == delta.sessionId })
+            }
+            null -> Unit
         }
     }
 

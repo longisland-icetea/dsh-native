@@ -101,6 +101,56 @@ sealed interface HostEvent {
     data class Cancelled(val eventId: String) : HostEvent
 }
 
+/**
+ * A lightweight session-state change the Host pushes on its own.
+ *
+ * These arrive as `emit` frames on `$events` and are how the sidebar stays live
+ * on the desktop: `api-session/status` carries the running flag and
+ * `api-session/activity` a new timestamp, both by session id, so neither needs a
+ * full `session/list` round trip or a deserialised summary.
+ */
+sealed interface SessionDelta {
+    /** `api-session/status(sessionId, running)`. */
+    data class Running(val sessionId: String, val running: Boolean) : SessionDelta
+
+    /** `api-session/activity(sessionId, updatedAt)` — a human sent a message. */
+    data class Activity(val sessionId: String, val updatedAt: Long) : SessionDelta
+
+    /** `api-session/added(summary)`: a session appeared, or its shape changed. */
+    data class Added(val session: SessionSummary) : SessionDelta
+
+    /** `api-session/removed(sessionId)`. */
+    data class Removed(val sessionId: String) : SessionDelta
+
+    companion object {
+        /**
+         * Decode one emit frame, or null when it is not a session-state event.
+         *
+         * Null is the common case: `$events` also carries waterfalls and notices
+         * this client answers elsewhere.
+         */
+        fun from(event: String, args: List<JsonElement>): SessionDelta? = when (event) {
+            "api-session/status" -> {
+                val id = args.getOrNull(0)?.jsonPrimitive?.contentOrNull
+                val running = args.getOrNull(1)?.jsonPrimitive?.booleanOrNull
+                if (id == null || running == null) null else Running(id, running)
+            }
+            "api-session/activity" -> {
+                val id = args.getOrNull(0)?.jsonPrimitive?.contentOrNull
+                val at = args.getOrNull(1)?.jsonPrimitive?.longOrNull
+                if (id == null || at == null) null else Activity(id, at)
+            }
+            "api-session/added" -> args.getOrNull(0)
+                ?.let { SessionListCodec.parseOne(it) }
+                ?.let(::Added)
+            "api-session/removed" -> args.getOrNull(0)
+                ?.jsonPrimitive?.contentOrNull
+                ?.let(::Removed)
+            else -> null
+        }
+    }
+}
+
 object HostEventCodec {
     fun decode(value: JsonElement): HostEvent? {
         val obj = value as? JsonObject ?: return null
@@ -324,20 +374,23 @@ data class SessionSummary(
 object SessionListCodec {
     fun parse(value: JsonElement): List<SessionSummary> {
         val items = (value as? JsonObject)?.get("items") as? JsonArray ?: return emptyList()
-        return items.mapNotNull { element ->
-            val obj = element as? JsonObject ?: return@mapNotNull null
-            val sessionId = obj.string("sessionId") ?: return@mapNotNull null
-            SessionSummary(
-                sessionId = sessionId,
-                updatedAt = obj.long("updatedAt") ?: 0L,
-                running = obj.bool("running") ?: false,
-                blank = obj.bool("blank") ?: false,
-                origin = obj.string("origin"),
-                parentSessionId = obj.string("parentSessionId"),
-                cwd = obj.string("cwd"),
-                projections = obj["projections"],
-            )
-        }
+        return items.mapNotNull { parseOne(it) }
+    }
+
+    /** One summary, as `session/list` carries it and as `api-session/added` pushes it. */
+    fun parseOne(element: JsonElement): SessionSummary? {
+        val obj = element as? JsonObject ?: return null
+        val sessionId = obj.string("sessionId") ?: return null
+        return SessionSummary(
+            sessionId = sessionId,
+            updatedAt = obj.long("updatedAt") ?: 0L,
+            running = obj.bool("running") ?: false,
+            blank = obj.bool("blank") ?: false,
+            origin = obj.string("origin"),
+            parentSessionId = obj.string("parentSessionId"),
+            cwd = obj.string("cwd"),
+            projections = obj["projections"],
+        )
     }
 
     private fun JsonObject.string(key: String): String? =

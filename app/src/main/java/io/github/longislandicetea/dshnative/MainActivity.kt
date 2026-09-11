@@ -73,7 +73,9 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,7 +89,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -934,9 +939,23 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
     // "load older" scroll to the bottom, because prepending a page changed it.
     val newestKey = conversation.items.lastOrNull()?.key
 
-    LaunchedEffect(newestKey, liveText) {
-        val lastIndex = total + if (liveText.isNotEmpty()) 1 else 0
-        if (lastIndex > 0) listState.animateScrollToItem(lastIndex)
+    // Follow the newest message only while the reader is already at the bottom.
+    // Without this the transcript yanked itself back down on every streaming
+    // update, so a page loaded with "Load older" was pulled out from under the
+    // reader within a second -- "load older does not work".
+    // Follow the newest row only while the reader is already at the bottom.
+    // `canScrollForward` is read live inside the effect: a `following` flag would
+    // be captured stale by the flow, and re-running the effect when the flag
+    // changed made the list animate back to the newest row the moment the reader
+    // scrolled away from it -- which is what made "Load older" feel broken.
+    LaunchedEffect(listState, conversation.sessionId) {
+        snapshotFlow { newestKey to liveText }
+            .distinctUntilChanged()
+            .collect {
+                if (listState.canScrollForward) return@collect
+                val lastIndex = total - 1 + if (liveText.isNotEmpty()) 1 else 0
+                if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+            }
     }
 
     // Opening a conversation must not raise the keyboard: the field is there to be
@@ -964,18 +983,33 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
 
     var anchorKey by remember(conversation.sessionId) { mutableStateOf<String?>(null) }
     var anchorOffset by remember(conversation.sessionId) { mutableStateOf(0) }
-    var pendingAnchor by remember(conversation.sessionId) { mutableStateOf(false) }
 
-    LaunchedEffect(total, pendingAnchor) {
-        if (!pendingAnchor) return@LaunchedEffect
-        val key = anchorKey ?: return@LaunchedEffect
-        val index = conversation.items.indexOfFirst { it.key == key }
-        if (index >= 0) {
-            // The same item, at the same distance from the top: the content above it
-            // moved, the viewport did not.
-            listState.scrollToItem(index, anchorOffset)
-        }
-        pendingAnchor = false
+    // Watch the item list itself rather than a count: a page can land while the
+    // session is streaming, and the key is the only thing that survives both the
+    // prepend and a rebuilt snapshot. Once the row has been found the anchor is
+    // dropped, so this cannot fight the reader afterwards.
+    //
+    // The offset is read from the list inside the effect, not from a captured
+    // variable: a `snapshotFlow` body closes over the values it saw when it was
+    // created, so a captured offset would be the one from before the page landed.
+    LaunchedEffect(listState, conversation.sessionId) {
+        // Re-resolve on every change to the items or the anchor, and only clear the
+        // anchor once the row has actually been found. The transcript is transiently
+        // empty in a real session -- a follow stream rebuilds it, and a page load can
+        // overlap that -- and one-shot resolution simply gave up in that case, which
+        // left the reader at the top of the new page.
+        snapshotFlow { Triple(anchorKey, anchorOffset, conversation.items) }
+            .collect { (wanted, offset, items) ->
+                if (wanted == null || items.isEmpty()) return@collect
+                val index = items.indexOfFirst { it.key == wanted }
+                if (index >= 0) {
+                    // The message index has to be shifted back into list space, and
+                    // the leading items may have changed: the button disappears once
+                    // the last page lands, which removes one.
+                    listState.scrollToItem(index + leadingItems, offset)
+                    anchorKey = null
+                }
+            }
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -990,13 +1024,22 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                     TextButton(
                         onClick = {
                             // Remember the reader's place before the page lands: the
-                            // item at the top of the viewport, by key, and how far
-                            // into it the viewport starts.
-                            val index = listState.firstVisibleItemIndex - leadingItems
-                            conversation.items.getOrNull(index)?.let { first ->
-                                anchorKey = first.key
-                                anchorOffset = listState.firstVisibleItemScrollOffset
-                                pendingAnchor = true
+                            // row at the top of the viewport, by key, and how far
+                            // into it the viewport starts. The key survives the
+                            // prepend, which shifts every index.
+                            //
+                            // This button is itself a list item at the very top, so
+                            // the row under the viewport is usually the *second*
+                            // visible item. Taking `firstVisibleItemIndex` alone
+                            // resolved to index -1, set no anchor, and let the page
+                            // land with the reader at the newest line of it.
+                            val firstMessage = listState.firstVisibleItemIndex - leadingItems
+                            val index = if (firstMessage >= 0) firstMessage else 0
+                            val offset =
+                                if (firstMessage >= 0) listState.firstVisibleItemScrollOffset else 0
+                            conversation.items.getOrNull(index)?.let { row ->
+                                anchorKey = row.key
+                                anchorOffset = offset
                             }
                             holder.loadOlder()
                         },
@@ -1028,10 +1071,25 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
             Modifier.fillMaxWidth().background(PANEL).padding(8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
+            val fieldFocus = remember { FocusRequester() }
+            val keyboard = LocalSoftwareKeyboardController.current
             TextField(
                 value = input,
                 onValueChange = { input = it },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(fieldFocus)
+                    // A tap must raise the keyboard even when the field already holds
+                    // focus: after the IME is dismissed with Back the field is still
+                    // focused, so tapping it produces no focus *change* and Compose
+                    // never asks for the keyboard again. Requesting both explicitly
+                    // makes every tap work, which is what a reader expects.
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = {
+                            fieldFocus.requestFocus()
+                            keyboard?.show()
+                        })
+                    },
                 placeholder = { Text("Message", fontSize = 13.sp, color = MUTED) },
                 maxLines = 5,
                 colors = TextFieldDefaults.colors(
