@@ -34,9 +34,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
@@ -1068,13 +1070,15 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            // Room at the bottom so the newest row is not hidden behind the jump
-            // button while the reader sits at the end of the transcript.
+            // Deliberately small: reserving room for the jump button here left a
+            // band of blank space under the last message even when the button was
+            // not shown. The button is inset from the bottom by its own 16dp gap
+            // instead, so nothing is reserved while it is hidden.
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
                 start = 12.dp,
                 end = 12.dp,
                 top = 12.dp,
-                bottom = 96.dp,
+                bottom = 12.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -1123,13 +1127,17 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
             // scrolled away -- which is also when a new message stops dragging the
             // viewport, so the affordance replaces the old compulsory follow.
             if (!atBottom && total > 0) {
+                // A bare circular arrow rather than a labelled pill: it is a
+                // one-gesture affordance that sits over the transcript, so it should
+                // take as little of the reader's view as possible.
                 Surface(
                     color = PANEL,
-                    shape = RoundedCornerShape(20.dp),
+                    shape = CircleShape,
                     shadowElevation = 6.dp,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(end = 14.dp, bottom = 14.dp)
+                        .size(48.dp)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
@@ -1139,13 +1147,13 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                             scope.launch { listState.animateScrollToItem(total - 1) }
                         },
                 ) {
-                    Row(
-                        Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("↓", color = ACCENT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Newest", color = Color(0xFFDDE2EC), fontSize = 12.sp)
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Filled.KeyboardArrowDown,
+                            contentDescription = "Jump to newest",
+                            tint = ACCENT,
+                            modifier = Modifier.size(26.dp),
+                        )
                     }
                 }
             }
