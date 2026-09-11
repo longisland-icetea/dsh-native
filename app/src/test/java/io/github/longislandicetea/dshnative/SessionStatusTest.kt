@@ -1,6 +1,7 @@
 package io.github.longislandicetea.dshnative
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -29,8 +30,32 @@ class SessionStatusTest {
     }
 
     @Test
-    fun `an idle session with nothing pending is done`() {
-        assertEquals(SessionStatus.Done, sessionStatus(running = false, needsAnswer = false))
+    fun `an idle session nobody has read is done`() {
+        assertEquals(
+            SessionStatus.Done,
+            sessionStatus(running = false, needsAnswer = false, unread = true),
+        )
+    }
+
+    @Test
+    fun `an idle session already read shows nothing`() {
+        // The web sidebar leaves a read session unmarked, and marking every
+        // finished session green said nothing: almost every session is finished
+        // almost all of the time.
+        assertNull(sessionStatus(running = false, needsAnswer = false, unread = false))
+    }
+
+    @Test
+    fun `running and waiting survive being read`() {
+        // Read state only decides the unremarkable case.
+        assertEquals(
+            SessionStatus.Running,
+            sessionStatus(running = true, needsAnswer = false, unread = false),
+        )
+        assertEquals(
+            SessionStatus.NeedsYou,
+            sessionStatus(running = false, needsAnswer = true, unread = false),
+        )
     }
 
     @Test

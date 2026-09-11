@@ -155,10 +155,19 @@ internal enum class SessionStatus { Running, NeedsYou, Done }
  * worth interrupting for -- it is the one that blocks an agent. Everything else has
  * finished what it was asked to do.
  */
-internal fun sessionStatus(running: Boolean, needsAnswer: Boolean): SessionStatus = when {
+internal fun sessionStatus(
+    running: Boolean,
+    needsAnswer: Boolean,
+    unread: Boolean = true,
+): SessionStatus? = when {
     running -> SessionStatus.Running
     needsAnswer -> SessionStatus.NeedsYou
-    else -> SessionStatus.Done
+    // Idle and read is the unremarkable case: no dot, no label, exactly as the
+    // web sidebar leaves a session it has nothing to say about. Marking every
+    // finished session green said nothing, because almost every session is
+    // finished almost all of the time.
+    unread -> SessionStatus.Done
+    else -> null
 }
 
 internal fun statusColor(status: SessionStatus): Color = when (status) {
@@ -922,6 +931,7 @@ private fun SessionDrawer(
                             active = state.conversation?.sessionId == session.sessionId,
                             archived = state.archived.contains(session.sessionId),
                             needsAnswer = state.pending.any { it.sessionId == session.sessionId },
+                            unread = session.sessionId in state.unread,
                             onPick = { onPick(session) },
                             onArchive = { onArchive(session.sessionId) },
                         )
@@ -1314,6 +1324,8 @@ private fun SessionRow(
     archived: Boolean,
     /** Whether this session has an approval or question waiting to be answered. */
     needsAnswer: Boolean,
+    /** Whether its last turn finished without the reader looking at it. */
+    unread: Boolean,
     onPick: () -> Unit,
     onArchive: () -> Unit,
 ) {
@@ -1336,15 +1348,17 @@ private fun SessionRow(
             // One dot per row, coloured by state: blue while a turn runs, orange
             // when the session is waiting on an answer, green once it is done. The
             // label carries the meaning for anyone who cannot rely on the colour.
-            val status = sessionStatus(session.running, needsAnswer)
-            Box(
-                Modifier
-                    .size(8.dp)
-                    .background(statusColor(status), CircleShape),
-            )
-            Spacer(Modifier.width(6.dp))
-            Text(statusLabel(status), color = statusColor(status), fontSize = 10.sp)
-            Spacer(Modifier.width(8.dp))
+            val status = sessionStatus(session.running, needsAnswer, unread)
+            if (status != null) {
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .background(statusColor(status), CircleShape),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(statusLabel(status), color = statusColor(status), fontSize = 10.sp)
+                Spacer(Modifier.width(8.dp))
+            }
             if (session.origin == "subagent") {
                 Text("subagent", color = MUTED, fontSize = 10.sp)
                 Spacer(Modifier.width(8.dp))

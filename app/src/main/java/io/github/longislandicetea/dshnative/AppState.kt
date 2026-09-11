@@ -124,6 +124,27 @@ data class PendingInteraction(
 
 /** One row in the transcript. */
 /**
+ * The unread set after one running-state change.
+ *
+ * A turn that stops in a session the reader is not looking at finished something
+ * they have not seen, which is what marks it unread; opening the session clears the
+ * mark. A turn that starts is busy again, so it is not "finished and unseen".
+ *
+ * Pure so the transitions can be tested: the Host reports running state but nothing
+ * about read state, so this rule is the whole definition of unread in the client.
+ */
+internal fun unreadAfter(
+    unread: Set<String>,
+    sessionId: String,
+    running: Boolean,
+    opened: String?,
+): Set<String> = when {
+    running -> unread - sessionId
+    sessionId != opened -> unread + sessionId
+    else -> unread
+}
+
+/**
  * The card header for a notice: the plugin's short name, or the source kind.
  *
  * `source.plugin` is a package path for built-ins (`tool-jobs`) but a scope path
@@ -394,6 +415,15 @@ data class AppState(
      */
     val archivedKnown: Boolean = false,
     /**
+     * Sessions that finished a turn the reader has not looked at yet.
+     *
+     * The Host reports `running` but nothing about read state, and `updatedAt`
+     * tracks only the reader's own prompts, so "unread" is maintained here: a
+     * session entering the set when its turn ends while it is not on screen, and
+     * leaving it when the reader opens it.
+     */
+    val unread: Set<String> = emptySet(),
+    /**
      * Set when the workspace stream has stopped without ever delivering a baseline.
      *
      * A slow stream is not a failed one, so the drawer waits for the baseline rather
@@ -621,6 +651,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private fun applySessionDelta(active: DshClient, event: String, args: List<JsonElement>) {
         when (val delta = SessionDelta.from(event, args)) {
             is SessionDelta.Running -> _state.update { current ->
+                val unread = unreadAfter(current.unread, delta.sessionId, delta.running, current.conversation?.sessionId)
                 current.copy(
                     sessions = current.sessions.map { summary ->
                         if (summary.sessionId == delta.sessionId) {
@@ -629,6 +660,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                             summary
                         }
                     },
+                    unread = unread,
                 )
             }
             is SessionDelta.Activity -> _state.update { current ->
@@ -901,7 +933,15 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         _state.update { it.copy(log = (listOf(line) + it.log).take(80)) }
     }
 
+    /** Mark a session as looked at, which is what clears its unread state. */
+    fun markRead(sessionId: String) {
+        _state.update { current ->
+            if (sessionId !in current.unread) current else current.copy(unread = current.unread - sessionId)
+        }
+    }
+
     fun openSession(session: SessionSummary) {
+        markRead(session.sessionId)
         // The summary already carries the session's model selection inside its
         // projections, so the picker opens showing the truth rather than waiting
         // for a catalog round trip.
