@@ -64,6 +64,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -74,6 +75,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
@@ -943,16 +945,40 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
     // Without this the transcript yanked itself back down on every streaming
     // update, so a page loaded with "Load older" was pulled out from under the
     // reader within a second -- "load older does not work".
+    // Whether the reader is at the bottom drives both the follow behaviour above
+    // and the jump button below; one signal, read live from the list.
+    //
+    // `canScrollForward` is the wrong test here: the bottom content padding is part
+    // of the scrollable extent, so it stays true even when the last message is on
+    // screen, which pinned the jump button on permanently. "The last item is laid
+    // out and reaches the bottom of the viewport" is the question that actually
+    // matters.
+    val atBottom by remember(conversation.sessionId) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+            last.index == info.totalItemsCount - 1 &&
+                last.offset + last.size <= info.viewportEndOffset - info.afterContentPadding + 48
+        }
+    }
+
     // Follow the newest row only while the reader is already at the bottom.
     // `canScrollForward` is read live inside the effect: a `following` flag would
     // be captured stale by the flow, and re-running the effect when the flag
     // changed made the list animate back to the newest row the moment the reader
     // scrolled away from it -- which is what made "Load older" feel broken.
+    // Land on the newest message when a conversation opens. Without this the list
+    // started at the oldest row of the window, which also left the jump button
+    // showing on a conversation the reader had not scrolled at all.
+    LaunchedEffect(conversation.sessionId, total > 0) {
+        if (total > 0) listState.scrollToItem(total - 1)
+    }
+
     LaunchedEffect(listState, conversation.sessionId) {
         snapshotFlow { newestKey to liveText }
             .distinctUntilChanged()
             .collect {
-                if (listState.canScrollForward) return@collect
+                if (!atBottom) return@collect
                 val lastIndex = total - 1 + if (liveText.isNotEmpty()) 1 else 0
                 if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
             }
@@ -967,11 +993,19 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         focusManager.clearFocus(force = true)
     }
 
-    // Paging up must leave the reader where they were. Prepending a page shifts
-    // every index, so the item under the top of the viewport is remembered by *key*
-    // before the page is requested and scrolled back to afterwards -- otherwise the
-    // transcript jumps to the oldest line of the new page and the reader has to
-    // find their place again on every load.
+    // Paging up is meant to leave the reader where they were: the row under the top
+    // of the viewport is remembered by *key* before the page is requested and
+    // scrolled back to afterwards.
+    //
+    // KNOWN LIMITATION, deliberately left in place: it does not hold reliably. A
+    // page that was just prepended has never been measured, and `scrollToItem`
+    // places an item using the *estimated* height of everything above it, so the
+    // restored position drifts -- on a 2772px screen it was measured at ~1074px,
+    // which looks like a screenful of older messages appearing under the button.
+    // The robust fix is `reverseLayout = true` (bottom-anchored, as chat clients
+    // do): prepending then needs no compensation at all. That touches the follow
+    // scroll, the button's position, and several index calculations, so it is
+    // tracked as its own change rather than folded into this one.
     // The list is not only messages: the paging button, an error line, and the
     // streaming bubble can each sit at the top, so a list index is not a message
     // index. Counting the leading items is what keeps the anchor pointing at the
@@ -1001,22 +1035,47 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         snapshotFlow { Triple(anchorKey, anchorOffset, conversation.items) }
             .collect { (wanted, offset, items) ->
                 if (wanted == null || items.isEmpty()) return@collect
-                val index = items.indexOfFirst { it.key == wanted }
-                if (index >= 0) {
-                    // The message index has to be shifted back into list space, and
-                    // the leading items may have changed: the button disappears once
-                    // the last page lands, which removes one.
-                    listState.scrollToItem(index + leadingItems, offset)
-                    anchorKey = null
-                }
+                // The message index has to be shifted back into list space, and the
+                // leading items may have changed: the button disappears once the last
+                // page lands, which removes one.
+                fun target(): Int =
+                    items.indexOfFirst { it.key == wanted }
+                        .takeIf { it >= 0 }
+                        ?.plus(leadingItems)
+                        ?: -1
+                val index = target()
+                if (index < 0) return@collect
+
+                // Two passes, because `scrollToItem` places an item using the
+                // *estimated* height of everything above it -- and a page that was
+                // just prepended has never been measured. One pass therefore landed
+                // hundreds of pixels off, which is what made a load look like it had
+                // dumped a screenful of older messages into the viewport. The second
+                // pass runs after a frame, when the estimates have been replaced by
+                // real heights, and only nudges.
+                listState.scrollToItem(index, offset)
+                withFrameNanos { }
+                val settled = target()
+                if (settled >= 0) listState.scrollToItem(settled, offset)
+                anchorKey = null
             }
     }
 
+    val scope = rememberCoroutineScope()
+
     Column(Modifier.fillMaxSize().imePadding()) {
+        Box(Modifier.weight(1f)) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+            modifier = Modifier.fillMaxSize(),
+            // Room at the bottom so the newest row is not hidden behind the jump
+            // button while the reader sits at the end of the transcript.
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                start = 12.dp,
+                end = 12.dp,
+                top = 12.dp,
+                bottom = 96.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (conversation.hasMore) {
@@ -1056,6 +1115,38 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
             conversation.error?.let { message ->
                 item {
                     Text("⚠ $message", color = WARN, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
+                }
+            }
+        }
+
+            // Jump to the newest message. It appears exactly when the reader has
+            // scrolled away -- which is also when a new message stops dragging the
+            // viewport, so the affordance replaces the old compulsory follow.
+            if (!atBottom && total > 0) {
+                Surface(
+                    color = PANEL,
+                    shape = RoundedCornerShape(20.dp),
+                    shadowElevation = 6.dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 14.dp, bottom = 14.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) {
+                            // Returning to the bottom also resumes following, so the
+                            // next message arrives in view as it used to.
+                            scope.launch { listState.animateScrollToItem(total - 1) }
+                        },
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("↓", color = ACCENT, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Newest", color = Color(0xFFDDE2EC), fontSize = 12.sp)
+                    }
                 }
             }
         }
