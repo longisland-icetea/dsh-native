@@ -34,6 +34,14 @@ class EndpointParseTest {
     }
 
     @Test
+    fun `an ideographic full stop is a dot`() {
+        // `。` is U+3002, in the CJK punctuation block -- *not* in the full-width
+        // ASCII block, which is why folding only that block left the address
+        // unresolvable.
+        assertEquals("192.168.1.20", DshEndpoint.normalizePunctuation("192。168。1。20"))
+    }
+
+    @Test
     fun `full-width punctuation parses`() {
         // What a Chinese IME produces for `.` and `:`.
         val endpoint = DshEndpoint.parse("192。168。255。5：3080")
@@ -45,6 +53,7 @@ class EndpointParseTest {
     fun `full-width punctuation folds to ascii`() {
         assertEquals("192.168.1.20:3080", DshEndpoint.normalizePunctuation("192。168。1。20：3080"))
         assertEquals("192.168.1.20:3080", DshEndpoint.normalizePunctuation("192.168.1.20:3080"))
+        assertEquals("abc123", DshEndpoint.normalizePunctuation("ａｂｃ１２３"))
     }
 
     @Test

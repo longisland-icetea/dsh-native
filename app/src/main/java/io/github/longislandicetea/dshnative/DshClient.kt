@@ -48,18 +48,30 @@ data class DshEndpoint(val host: String, val port: Int = 3080) {
 
     companion object {
         /**
-         * Fold full-width punctuation onto its ASCII form.
+         * Fold the punctuation a CJK keyboard substitutes for ASCII.
          *
-         * A CJK keyboard emits `。` for a typed `.`, so an address copied off the
-         * phone can carry `192。168.1.5`. The fold covers the whole full-width ASCII
-         * block rather than a list of marks: a list needs one entry per keyboard,
-         * and anything else a keyboard produces is the reader's typo to see and fix.
+         * Two blocks, because the marks that matter are not in the same one:
+         *
+         *  - `U+FF01..U+FF5E` is the full-width ASCII block, which is what a
+         *    Chinese IME emits for letters and digits;
+         *  - `U+3000..U+303F` is CJK punctuation, and it holds `。` (U+3002), the
+         *    ideographic full stop -- which is what the `.` key actually produces.
+         *    An earlier version folded only the first block, so `192。168.1.5`
+         *    kept its ideographic stops and failed at DNS.
          */
         internal fun normalizePunctuation(input: String): String = buildString(input.length) {
             input.forEach { ch ->
-                append(if (ch.code in 0xFF01..0xFF5E) (ch.code - 0xFEE0).toChar() else ch)
+                append(
+                    when (ch.code) {
+                        in 0xFF01..0xFF5E -> (ch.code - 0xFEE0).toChar()
+                        // Ideographic full stop and comma are the two CJK marks that
+                        // stand in for ASCII punctuation on an address.
+                        0x3002 -> '.'
+                        0x3001 -> ','
+                        else -> ch
+                    },
+                )
             }
-        }
         }
 
         /** Accepts `host`, `host:port`, or a pasted URL; rejects anything but http/ws. */
