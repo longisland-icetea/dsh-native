@@ -125,14 +125,14 @@ object SimpleMarkdown {
                 // just a line containing pipes.
                 isTableRow(line) && index + 1 < lines.size && TABLE_DIVIDER.matches(lines[index + 1]) -> {
                     flush()
-                    val header = splitRow(line)
                     val rows = mutableListOf<List<String>>()
                     index += 2
                     while (index < lines.size && isTableRow(lines[index]) && lines[index].isNotBlank()) {
                         rows += splitRow(lines[index])
                         index++
                     }
-                    blocks += MarkdownBlock.Table(header, rows)
+                    val (header, padded) = normalizeRows(splitRow(line), rows)
+                    blocks += MarkdownBlock.Table(header, padded)
                 }
                 trimmed.startsWith(">") -> {
                     add(trimmed.removePrefix(">").trimStart(), ProseKind.Quote)
@@ -164,8 +164,75 @@ object SimpleMarkdown {
 
     private fun isTableRow(line: String): Boolean = line.contains('|') && line.trim().isNotEmpty()
 
-    private fun splitRow(line: String): List<String> =
-        line.trim().trim('|').split('|').map { it.trim() }
+    /**
+     * Split one table row into cells.
+     *
+     * Two escapes have to be honoured, because models emit them and splitting on
+     * every pipe corrupts the row rather than the cell:
+     *
+     *  - `\|` is a literal pipe, which is how LaTeX absolute values arrive
+     *    (`\left| x \right|` becomes `\left\| x \right\|` inside a cell);
+     *  - a pipe inside `` `code` `` is part of the literal text, not a separator.
+     *
+     * Getting this wrong produced rows with more cells than the header, and a row
+     * with extra cells lays its content out shifted by one column -- which reads as
+     * "the columns are not aligned" rather than as a parsing bug.
+     */
+    internal fun splitRow(line: String): List<String> {
+        val trimmed = line.trim()
+        val body = trimmed.removePrefix("|").removeSuffix("|")
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var inCode = false
+        var index = 0
+        while (index < body.length) {
+            val ch = body[index]
+            when {
+                ch == '\\' && index + 1 < body.length && body[index + 1] == '|' -> {
+                    current.append('|')
+                    index += 2
+                }
+                ch == '`' -> {
+                    inCode = !inCode
+                    current.append(ch)
+                    index++
+                }
+                ch == '|' && !inCode -> {
+                    cells += current.toString().trim()
+                    current.setLength(0)
+                    index++
+                }
+                else -> {
+                    current.append(ch)
+                    index++
+                }
+            }
+        }
+        cells += current.toString().trim()
+        return cells
+    }
+
+    /**
+     * Pad every row out to the header's column count.
+     *
+     * The header is the authority on how many columns a table has. A short row is
+     * common and harmless once padded; a long one is a parsing artefact, but
+     * trimming it is still better than shifting the row's cells sideways.
+     */
+    internal fun normalizeRows(
+        header: List<String>,
+        rows: List<List<String>>,
+    ): Pair<List<String>, List<List<String>>> {
+        val columns = header.size
+        if (columns == 0) return header to rows
+        return header to rows.map { row ->
+            when {
+                row.size == columns -> row
+                row.size < columns -> row + List(columns - row.size) { "" }
+                else -> row.take(columns)
+            }
+        }
+    }
 
     /**
      * Inline spans: `code`, **bold**, *italic*, ~~strike~~, [text](url), and

@@ -1437,12 +1437,17 @@ private fun RowScope.TableCell(text: String, width: androidx.compose.ui.unit.Dp,
             fontSize = 12.sp,
             lineHeight = 16.sp,
             fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.padding(
-                start = TABLE_CELL_PADDING,
-                end = if (last) TABLE_CELL_PADDING else 4.dp,
-                top = 6.dp,
-                bottom = 6.dp,
-            ),
+            // `weight(1f)` is what confines the text to its column. Without it the
+            // Text takes its full intrinsic width, overflows the fixed-width cell,
+            // and every row then appears to have different column positions.
+            modifier = Modifier
+                .weight(1f)
+                .padding(
+                    start = TABLE_CELL_PADDING,
+                    end = if (last) TABLE_CELL_PADDING else 4.dp,
+                    top = 6.dp,
+                    bottom = 6.dp,
+                ),
         )
         // The vertical rule between columns is the strongest cue that a row of
         // numbers is a row of fields.
