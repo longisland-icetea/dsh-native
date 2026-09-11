@@ -14,7 +14,6 @@
          anything but http/ws to a private address (see Endpoint.kt). -->
     <application
         android:allowBackup="true"
-        android:debuggable="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"

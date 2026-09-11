@@ -75,6 +75,17 @@ echo "   library res trees: $(( ${#TREES[@]} - 1 ))"
 "$BT/aapt2" compile --dir "$STAGE" -o "$OUT/res.zip"
 
 echo "== aapt2 link"
+# `android:debuggable` is injected here rather than declared in the manifest: the
+# Gradle build sets it per variant, and hardcoding it in the source made lint fail
+# the release build with `HardcodedDebugMode` -- correctly, since a release APK must
+# not carry it. The generated manifest lives in $OUT, never in the source tree.
+MANIFEST="$OUT/AndroidManifest.xml"
+if [ "${DEBUGGABLE:-true}" = "true" ]; then
+  sed 's|<application|<application\n        android:debuggable="true"|' \
+    "$ROOT/app/src/main/AndroidManifest.xml" > "$MANIFEST"
+else
+  cp "$ROOT/app/src/main/AndroidManifest.xml" "$MANIFEST"
+fi
 # Library R classes are generated, not shipped: the aars in this graph contain
 # no R.class at all (verified), so aapt2 has to emit one per library package or
 # compiled library code fails at runtime with NoClassDefFoundError on
@@ -84,7 +95,7 @@ SYMBOLS="$OUT/R.txt"
 "$BT/aapt2" link \
   -o "$OUT/base.apk" \
   -I "$ANDROID_JAR" \
-  --manifest "$ROOT/app/src/main/AndroidManifest.xml" \
+  --manifest "$MANIFEST" \
   --java "$OUT/gen" \
   --output-text-symbols "$SYMBOLS" \
   --min-sdk-version 29 \

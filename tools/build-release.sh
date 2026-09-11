@@ -53,9 +53,12 @@ DEFAULT_RULES="$ROOT/tools/proguard-android-optimize.txt"
 # ── 2. the debug build's outputs ─────────────────────────────────────────────
 # Resources are identical between the two build types here (no resource
 # shrinking), so the debug build supplies them and R8 only has to handle code.
+# `DEBUGGABLE=false` because this build's manifest is copied into the release APK:
+# a release carrying `android:debuggable="true"` is exactly what lint's
+# HardcodedDebugMode check exists to prevent.
 if [ ! -f "$DEBUG_OUT/aligned.apk" ] || [ "${REBUILD:-1}" = "1" ]; then
-  echo "== debug build (for resources and classes)"
-  "$ROOT/tools/build.sh" >/dev/null
+  echo "== base build (resources and classes, not debuggable)"
+  DEBUGGABLE=false "$ROOT/tools/build.sh" >/dev/null
 fi
 
 # ── 3. R8 ────────────────────────────────────────────────────────────────────
@@ -103,6 +106,12 @@ echo "== apksigner (keystore: $KEYSTORE)"
   --ks-key-alias "$KEYALIAS" --key-pass "pass:$KEYPASS" \
   --out "$ROOT/build/dsh-native-release.apk" "$OUT/aligned.apk"
 "$BT/apksigner" verify --print-certs "$ROOT/build/dsh-native-release.apk" | head -3
+
+if "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$ROOT/build/dsh-native-release.apk" 2>/dev/null \
+    | grep -q "debuggable.*=true"; then
+  echo "refusing to publish: the release APK is marked debuggable" >&2
+  exit 1
+fi
 
 echo
 echo "APK: $ROOT/build/dsh-native-release.apk ($(stat -c %s "$ROOT/build/dsh-native-release.apk") bytes)"
