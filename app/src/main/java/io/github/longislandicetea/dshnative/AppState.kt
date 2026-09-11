@@ -233,6 +233,20 @@ sealed interface TranscriptItem {
      * Background jobs arrive as plugin-sourced user messages; rendering them as
      * chat text made the harness look like the human.
      */
+    /**
+     * One turn's cost, placed after the turn it describes.
+     *
+     * A row rather than something the renderer derives: the first attempt looked
+     * the turn up from the row key while drawing, which needed the row to be the
+     * conversation's last and put the figure in the wrong place besides. The
+     * reducer knows when a turn ends and what it cost, so it says so once.
+     */
+    data class Usage(
+        override val key: String,
+        val usage: TokenUsage,
+        val turn: Int,
+    ) : TranscriptItem
+
     data class Notice(
         override val key: String,
         val label: String,
@@ -477,15 +491,16 @@ data class AppState(
     /** Pending queue per session, as the Host reports it. */
     val queues: Map<String, List<QueuedItem>> = emptyMap(),
     /**
-     * Tokens per turn, for the open conversation: turn number -> usage.
+     * Usage accumulated for the turn that is still open, keyed by turn number.
      *
-     * Accumulated from each `assistant/message`'s own `usage`, which is the only
-     * per-turn figure the Host sends -- the session projects totals, not turns.
-     * Kept as a separate map rather than folded into the transcript items so the
-     * reducer stays a pure function of one event.
+     * A turn has several assistant messages, each carrying its own `usage`, and
+     * the Host projects session totals rather than turns -- so the turn's cost is
+     * their sum, gathered here and turned into a [TranscriptItem.Usage] row when
+     * `turn/end` arrives. Only the open turn is kept: a finished turn's figures
+     * live on its row.
      */
-    val turnUsage: Map<Int, TokenUsage> = emptyMap(),
-    /** Seqs already folded into [turnUsage], so a replayed snapshot cannot double-count. */
+    val pendingTurnUsage: Map<Int, TokenUsage> = emptyMap(),
+    /** Seqs already folded into [pendingTurnUsage], so a replay cannot double-count. */
     val countedUsageSeqs: Set<Long> = emptySet(),
     /** Slash commands the Host offers for the open conversation. */
     val commands: List<CommandInfo> = emptyList(),
@@ -738,28 +753,37 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * their sum. The Host's session totals cannot answer "which turn was
      * expensive", which is the question a reader actually has.
      */
+    /**
+     * Add one assistant message's usage to the turn it belongs to.
+     *
+     * Returns the accumulated map and the seq guard together, so the caller can
+     * keep both in state without this reading or writing any.
+     */
     private fun accumulateTurnUsage(
         frame: FollowFrame,
         current: Map<Int, TokenUsage>,
         counted: Set<Long>,
-    ): Map<Int, TokenUsage> {
-        val event = (frame as? FollowFrame.Event)?.event ?: return current
-        if (event.type != "assistant/message") return current
+    ): Pair<Map<Int, TokenUsage>, Set<Long>> {
+        val unchanged = current to counted
+        val event = (frame as? FollowFrame.Event)?.event ?: return unchanged
+        if (event.type != "assistant/message") return unchanged
         // One event contributes once, however many times a reconnect replays it.
-        if (event.seq in counted) return current
-        val data = event.data as? JsonObject ?: return current
-        val turn = (data["turn"] as? JsonPrimitive)?.intOrNull ?: return current
+        if (event.seq in counted) return unchanged
+        val data = event.data as? JsonObject ?: return unchanged
+        val turn = (data["turn"] as? JsonPrimitive)?.intOrNull ?: return unchanged
+        val usage = data["usage"] ?: return unchanged
         val fresh = runCatching {
-            DshWire.json.decodeFromJsonElement(TokenUsage.serializer(), data["usage"] ?: return current)
-        }.getOrNull() ?: return current
+            DshWire.json.decodeFromJsonElement(TokenUsage.serializer(), usage)
+        }.getOrNull() ?: return unchanged
         val previous = current[turn] ?: TokenUsage()
-        return current + (turn to TokenUsage(
+        val sum = TokenUsage(
             uncachedInputTokens = previous.uncachedInputTokens + fresh.uncachedInputTokens,
             outputTokens = previous.outputTokens + fresh.outputTokens,
             cacheReadTokens = previous.cacheReadTokens + fresh.cacheReadTokens,
             cacheWriteTokens = previous.cacheWriteTokens + fresh.cacheWriteTokens,
             reasoningTokens = previous.reasoningTokens + fresh.reasoningTokens,
-        ))
+        )
+        return (current + (turn to sum)) to (counted + event.seq)
     }
 
     private fun applySessionDelta(active: DshClient, event: String, args: List<JsonElement>) {
@@ -768,6 +792,13 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 val unread = unreadAfter(current.unread, delta.sessionId, delta.running, current.conversation?.sessionId)
                 if (unread != current.unread) viewStore?.saveUnread(unread)
                 current.copy(
+                    // The open conversation takes its running flag from here, so
+                    // the composer's Stop/Send control flips the moment the Host
+                    // says the turn is over rather than when a row happens to
+                    // arrive.
+                    conversation = current.conversation?.let { open ->
+                        if (open.sessionId == delta.sessionId) open.copy(running = delta.running) else open
+                    },
                     sessions = current.sessions.map { summary ->
                         if (summary.sessionId == delta.sessionId) {
                             summary.copy(running = delta.running)
@@ -1229,7 +1260,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 ),
                 // Turn numbers restart per session, so a stale map would label
                 // this session's turn 2 with another session's tokens.
-                turnUsage = emptyMap(),
+                pendingTurnUsage = emptyMap(),
                 countedUsageSeqs = emptySet(),
                 selection = selection,
             )
@@ -1400,18 +1431,18 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             when (frame) {
                 is MuxFrame.Item -> {
                     val decoded = FollowCodec.decode(frame.value)
+                    // Decoded once and handed to both: a reconnect replays the
+                    // same assistant messages, and accumulating them twice would
+                    // inflate every turn's cost.
+                    val (usage, counted) = accumulateTurnUsage(
+                        decoded,
+                        current.pendingTurnUsage,
+                        current.countedUsageSeqs,
+                    )
                     current.copy(
-                        conversation = merge(conversation, decoded),
-                        // Decoded once and handed to both: a reconnect replays the
-                        // same assistant messages, and accumulating them twice
-                        // would inflate every turn's cost.
-                        turnUsage = accumulateTurnUsage(decoded, current.turnUsage, current.countedUsageSeqs),
-                        countedUsageSeqs = current.countedUsageSeqs +
-                            listOfNotNull(
-                                (decoded as? FollowFrame.Event)?.event
-                                    ?.takeIf { it.type == "assistant/message" }
-                                    ?.seq,
-                            ),
+                        conversation = merge(conversation, decoded, usage),
+                        pendingTurnUsage = usage,
+                        countedUsageSeqs = counted,
                     )
                 }
                 is MuxFrame.End -> current.copy(conversation = conversation.copy(running = false))
@@ -1422,7 +1453,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
-    private fun merge(conversation: Conversation, frame: FollowFrame): Conversation = when (frame) {
+    private fun merge(
+        conversation: Conversation,
+        frame: FollowFrame,
+        pendingTurnUsage: Map<Int, TokenUsage> = emptyMap(),
+    ): Conversation = when (frame) {
         is FollowFrame.Snapshot -> {
             // The snapshot is the newest window, not a delta: rebuild by seq so a
             // reconnect cannot duplicate or reorder what is already on screen.
@@ -1443,18 +1478,34 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             )
         }
 
-        is FollowFrame.Event -> conversation.copy(
+        is FollowFrame.Event -> {
+            val event = frame.event
+            val turn = (event.data as? JsonObject)?.get("turn")?.jsonPrimitive?.intOrNull
+            // The turn's usage accumulated as its assistant messages arrived;
+            // `turn/end` is where it becomes a row of its own. The reducer knows
+            // both facts, which a renderer reading keys at draw time did not.
+            val closed = if (event.type == "turn/end" && turn != null) {
+                pendingTurnUsage[turn]?.let { used ->
+                    TranscriptItem.Usage(key = "usage:$turn", usage = used, turn = turn)
+                }
+            } else {
+                null
+            }
+            conversation.copy(
             items = pairToolResults(
-                (conversation.items + listOfNotNull(toItem(frame.event, conversation.workspaceRoot)))
+                (conversation.items + listOfNotNull(toItem(event, conversation.workspaceRoot)) + listOfNotNull(closed))
                     .distinctBy { it.key },
             ),
-            lastSeq = maxOf(conversation.lastSeq, frame.event.seq),
-            running = when (frame.event.type) {
-                "turn/start" -> true
-                "turn/end" -> false
-                else -> conversation.running
-            },
-        )
+            lastSeq = maxOf(conversation.lastSeq, event.seq),
+            // Deliberately not derived from the event type. The Host reports
+            // whether a turn is running on `api-session/status`, and an inferred
+            // flag disagrees with it whenever a turn ends with a row that still
+            // says "running" -- which is what left the composer showing Stop after
+            // the turn was over. `api-session/status` is authoritative; this keeps
+            // whatever it last said.
+            running = conversation.running,
+            )
+        }
 
         is FollowFrame.AssistantChunk -> {
             val delta = frame.text ?: return conversation
@@ -1473,7 +1524,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * table and the reason for each choice).
      */
     private fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
-        val key = "seq-${event.seq}"
+        // `turn:<turn>:<seq>`: the turn is part of the key because the usage row
+        // is placed under the last row of its turn, and the renderer draws a
+        // stream of rows with no turn model of its own. A key of `seq-<n>` left
+        // that lookup with nothing to read.
+        val turn = (event.data as? JsonObject)?.get("turn")?.jsonPrimitive?.intOrNull
+        val key = if (turn == null) "seq-${event.seq}" else "turn:$turn:${event.seq}"
         val text = event.text
         return when (event.type) {
             "user/message" -> when {

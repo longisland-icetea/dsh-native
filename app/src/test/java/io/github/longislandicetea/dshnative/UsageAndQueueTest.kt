@@ -1,6 +1,7 @@
 package io.github.longislandicetea.dshnative
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -258,5 +259,42 @@ class UsageAndQueueTest {
         assertNull("a bare slash is not a command", CommandMenu.commandLine("/"))
         assertNull("ordinary prose is not a command", CommandMenu.commandLine("hello"))
         assertNull("so is a slash inside a word", CommandMenu.commandLine("and/or"))
+    }
+
+    // ---- the two bugs the first version of the usage row shipped with -------
+
+    /**
+     * The turn's cost is a row the reducer produces, not one the renderer derives.
+     *
+     * The first version looked the turn up from the row key while drawing -- and
+     * the key format it assumed was not the one in use, so the figure never
+     * appeared, and it was drawn in the wrong place even when it did. Keeping the
+     * decision in the reducer is what makes it testable at all.
+     */
+    @Test
+    fun usage_is_a_row_of_its_own() {
+        val item = TranscriptItem.Usage(
+            key = "usage:4",
+            usage = TokenUsage(uncachedInputTokens = 10, outputTokens = 20),
+            turn = 4,
+        )
+        assertEquals("usage:4", item.key)
+        assertEquals(4, item.turn)
+        assertEquals(30, item.usage.uncachedInputTokens + item.usage.outputTokens)
+    }
+
+    /**
+     * Only a status frame turns the composer's Stop back into Send.
+     *
+     * Inferred from the transcript it went wrong whenever a turn ended with a row
+     * that still read "running", leaving Stop on screen after the turn was over.
+     * The Host reports the flag; the app now only copies it.
+     */
+    @Test
+    fun running_comes_from_the_host_status_not_from_the_transcript() {
+        // The event name the Host uses, and the argument order the decoder reads.
+        val frame = SessionDelta.from("api-session/status", listOf(JsonPrimitive("session-1"), JsonPrimitive(false)))
+        assertEquals(SessionDelta.Running("session-1", false), frame)
+        assertNull("a status frame for another shape is not a running flag", SessionDelta.from("api-session/status", listOf(JsonPrimitive("session-1"))))
     }
 }

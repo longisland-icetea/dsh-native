@@ -1241,26 +1241,11 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                 }
             }
             items(conversation.items, key = { it.key }) { item ->
-                TranscriptRow(item, onOpenFile = holder::previewFile)
-                // The turn's cost goes under the last row of that turn, and only
-                // once the turn is over: the running turn's numbers are still
-                // moving, and a figure that changes while being read is worse
-                // than no figure.
-                val turn = turnOf(item.key)
-                if (turn != null && !conversation.running && turnOf(conversation.items.last().key) == turn) {
-                    state.turnUsage[turn]?.let { usage ->
-                        val metrics = state.metrics[conversation.sessionId]
-                        var showUsage by remember(item.key) { mutableStateOf(false) }
-                        TurnUsageRow(
-                            usage = usage,
-                            stats = metrics?.stats,
-                            onOpen = { showUsage = true },
-                        )
-                        if (showUsage) {
-                            TurnUsageDialog(usage, metrics?.stats, onDismiss = { showUsage = false })
-                        }
-                    }
-                }
+                TranscriptRow(
+                    item,
+                    onOpenFile = holder::previewFile,
+                    usageStats = state.metrics[conversation.sessionId]?.stats,
+                )
             }
             if (liveText.isNotEmpty()) {
                 item(key = "live") { AssistantBubble(liveText, streaming = true) }
@@ -1738,7 +1723,12 @@ private fun QuestionBody(interaction: PendingInteraction, holder: AppStateHolder
 }
 
 @Composable
-private fun TranscriptRow(item: TranscriptItem, onOpenFile: (String) -> Unit = {}) {
+private fun TranscriptRow(
+    item: TranscriptItem,
+    onOpenFile: (String) -> Unit = {},
+    /** The open session's totals, for the dialog a usage row opens. */
+    usageStats: SessionStats? = null,
+) {
     when (item) {
         is TranscriptItem.User -> UserBubble(item.text)
         is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming)
@@ -1750,6 +1740,17 @@ private fun TranscriptRow(item: TranscriptItem, onOpenFile: (String) -> Unit = {
         is TranscriptItem.Note -> Text(item.text, color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp))
         is TranscriptItem.Notice -> NoticeCard(item)
         is TranscriptItem.Todo -> TodoCard(item.todos)
+        is TranscriptItem.Usage -> {
+            var showUsage by remember(item.key) { mutableStateOf(false) }
+            TurnUsageRow(
+                usage = item.usage,
+                stats = usageStats,
+                onOpen = { showUsage = true },
+            )
+            if (showUsage) {
+                TurnUsageDialog(item.usage, usageStats, onDismiss = { showUsage = false })
+            }
+        }
         is TranscriptItem.Deliverables -> DeliverablesCard(item, onOpenFile)
     }
 }
@@ -1827,9 +1828,6 @@ internal fun isCommand(state: AppState, draft: String): Boolean {
     val name = line.substringBefore(' ').drop(1)
     return state.commands.any { it.name == name }
 }
-
-internal fun turnOf(key: String): Int? =
-    if (!key.startsWith("turn:")) null else key.removePrefix("turn:").substringBefore(':').toIntOrNull()
 
 internal val TABLE_CELL_PADDING = 8.dp
 internal val TABLE_RULE = Color(0xFF2A2F38)
