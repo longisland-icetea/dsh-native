@@ -79,6 +79,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
@@ -748,6 +749,17 @@ private fun SessionDrawer(
     onArchive: (String) -> Unit,
     onNewSession: (String?) -> Unit,
 ) {
+    // The list waits for the archive set so the first frame cannot show rows that
+    // are about to disappear, but only briefly: if that call is slow or failing,
+    // showing every session is better than a drawer that never finishes loading.
+    var gaveUpWaiting by remember(state.endpoint) { mutableStateOf(false) }
+    LaunchedEffect(state.archivedKnown) {
+        if (state.archivedKnown) return@LaunchedEffect
+        delay(3_000)
+        gaveUpWaiting = true
+    }
+    val waiting = !state.archivedKnown && !gaveUpWaiting
+
     Column(Modifier.fillMaxSize().background(PANEL)) {
         Row(
             Modifier.fillMaxWidth().padding(16.dp),
@@ -761,6 +773,7 @@ private fun SessionDrawer(
                     text = when {
                         !state.connected -> "offline"
                         state.sessionsError != null -> "list failed"
+                        !state.archivedKnown && !gaveUpWaiting -> "loading…"
                         // Counts what the list shows: subagent sessions are
                         // children of a parent row, and archived ones are hidden
                         // by default.
@@ -785,7 +798,15 @@ private fun SessionDrawer(
         }
         HorizontalDivider(color = Color(0xFF2A2E38))
         LazyColumn(Modifier.fillMaxSize()) {
-            if (state.sessions.isEmpty() && state.sessionsError == null) {
+            if (waiting && state.sessionsError == null) {
+                item {
+                    Text(
+                        text = "Loading sessions…",
+                        color = MUTED, fontSize = 12.sp,
+                        modifier = Modifier.padding(16.dp),
+                    )
+                }
+            } else if (state.sessions.isEmpty() && state.sessionsError == null) {
                 item {
                     Text(
                         text = if (state.connected) "No sessions reported yet. Pull Refresh."

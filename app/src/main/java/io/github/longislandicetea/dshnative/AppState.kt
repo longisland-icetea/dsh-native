@@ -381,6 +381,16 @@ data class AppState(
     val showArchived: Boolean = false,
     /** Whether the drawer's transport-log panel is shown. Off by default. */
     val showLog: Boolean = false,
+    /**
+     * Whether the Host has stated which sessions are archived.
+     *
+     * `session/list` and `workspace/follow` are separate calls and the list usually
+     * wins the race by a second or so, so for that window the archive set is empty
+     * and every archived session looks live. The drawer therefore waits for this
+     * before drawing a list: showing 75 sessions and then filtering down to 38 is
+     * worse than showing a loading line for a second.
+     */
+    val archivedKnown: Boolean = false,
     /** Routable models, loaded when the picker first opens. */
     val catalog: ModelCatalog? = null,
     /** Provider/model/effort currently in force for the open conversation. */
@@ -410,11 +420,20 @@ data class AppState(
                 (!session.blank || session.sessionId == conversation?.sessionId)
         }
 
-    /** Sessions grouped and ordered for the drawer. */
+    /**
+     * Sessions grouped and ordered for the drawer.
+     *
+     * Empty until the archive set is known, so the first frame cannot show a list
+     * that is about to lose a third of its rows.
+     */
     val groups: List<SessionGroup>
-        get() = SessionGroup.fromWorkspaces(
-            sessions, workspaces, conversation?.sessionId, archived, collapsed, showArchived,
-        )
+        get() = if (!archivedKnown) {
+            emptyList()
+        } else {
+            SessionGroup.fromWorkspaces(
+                sessions, workspaces, conversation?.sessionId, archived, collapsed, showArchived,
+            )
+        }
 }
 
 /**
@@ -489,7 +508,19 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         disconnect(quiet = true)
         val created = DshClient(endpoint, scope)
         client = created
-        _state.update { it.copy(endpoint = endpoint) }
+        // Connecting somewhere else invalidates the previous Host's grouping and
+        // archive set, and the drawer waits for the new baseline before drawing a
+        // list -- otherwise the old Host's archive choices would hide rows on the
+        // new one for a second.
+        _state.update {
+            it.copy(
+                endpoint = endpoint,
+                workspaces = emptyList(),
+                archived = emptySet(),
+                sessions = emptyList(),
+                archivedKnown = false,
+            )
+        }
         created.start()
 
         scope.launch(Dispatchers.IO) {
@@ -655,6 +686,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                                 it.copy(
                                     workspaces = baseline.items,
                                     archived = baseline.archivedSessionIds.toSet(),
+                                    archivedKnown = true,
                                 )
                             }
                         }
