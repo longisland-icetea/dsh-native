@@ -959,8 +959,11 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         derivedStateOf {
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
-            last.index == info.totalItemsCount - 1 &&
-                last.offset + last.size <= info.viewportEndOffset - info.afterContentPadding + 48
+            // "Near the end" rather than "the last row reaches the bottom edge".
+            // The strict form breaks the moment a message is appended: the last row
+            // moves down by its own height, which is greater than the tolerance, so
+            // following switched itself off exactly when it was needed.
+            last.index >= info.totalItemsCount - 2
         }
     }
 
