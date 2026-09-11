@@ -45,7 +45,9 @@ jobs:
   # it falls back to the debug artifact instead of failing the tag build.
   release:
     name: Signed release APK
-    needs: debug
+    # Deliberately not `needs: debug`: a debug-lane failure (artifact upload, size
+    # report, a test flake) must not block publishing a signed artifact. The release
+    # lane runs the same tests itself.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -69,6 +71,9 @@ jobs:
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "No signing secrets; skipping the signed release build." >&2
           fi
+      - name: Unit tests
+        if: steps.signing.outputs.configured == 'true'
+        run: bash ./gradlew --no-daemon testDebugUnitTest
       - name: Configure release signing
         if: steps.signing.outputs.configured == 'true'
         env:
