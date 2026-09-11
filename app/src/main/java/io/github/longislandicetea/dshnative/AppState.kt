@@ -8,7 +8,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -121,6 +123,35 @@ data class PendingInteraction(
         }
     }
 }
+
+/**
+ * Keep a long-lived stream subscribed, whatever ended it.
+ *
+ * `retry` and `retryWhen` only see failures, and a socket teardown reaches these
+ * streams as a plain completion. Nothing re-subscribed, so the banner still said
+ * connected while the stream was gone -- and for the forwarded-event stream that
+ * is not cosmetic: the Host replays a pending question only to a client that is
+ * listening at that moment, so an unsubscribed client never learns an agent is
+ * waiting, and the agent waits for an answer nobody can give.
+ *
+ * `onCompletion` turns a *clean* end into an `UpstreamEnded` failure, which
+ * `retryWhen` does see; a real failure is retried on its own cause. Verified by
+ * `StreamResubscribeTest`, which is what showed the plain `retry` version of this
+ * fix does nothing at all for a clean end.
+ */
+internal fun <T> Flow<T>.resubscribe(
+    delayMillis: Long,
+    onEnd: (Throwable?) -> Unit = {},
+): Flow<T> = onCompletion { cause ->
+    if (cause == null) throw UpstreamEnded()
+}.retryWhen { cause, _ ->
+    onEnd(cause)
+    delay(delayMillis)
+    true
+}
+
+/** A stream that finished cleanly, so [resubscribe] can retry it. */
+internal class UpstreamEnded : RuntimeException("stream closed")
 
 /** One row in the transcript. */
 /**
@@ -593,14 +624,20 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // process: `callbackFlow` closing with a cause while nothing collects
             // surfaces as an unhandled exception. Retry until the socket is up.
             try {
-            active.events()
-                .retryWhen { cause, _ ->
-                    record("events retry: ${cause.message}")
-                    delay(2_000)
-                    true
+            // Resubscribe on any end, completion included. `retryWhen` only sees
+            // failures, and a socket teardown reaching this flow as a plain
+            // completion left nothing subscribed: the banner still said connected
+            // while waterfalls went nowhere, because the Host replays a pending
+            // question only to a client that is listening at that moment. That is
+            // the whole difference between the question appearing and the agent
+            // waiting for an answer nobody can give.
+            val stream: Flow<MuxFrame> = active.events()
+                .resubscribe(delayMillis = 2_000) { cause ->
+                    record("events ended: ${cause?.message ?: "stream closed"}; resubscribing")
                 }
-                .catch { record("events stopped: ${it.message}") }
-                .collect { frame ->
+            stream
+                .catch { error: Throwable -> record("events stopped: ${error.message}") }
+                .collect { frame: MuxFrame ->
                 when (frame) {
                     is MuxFrame.Item -> {
                         when (val host = HostEventCodec.decode(frame.value)) {
@@ -1108,13 +1145,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         followJob = scope.launch(Dispatchers.IO) {
             try {
             active.follow(sessionId)
-                .retryWhen { cause, _ ->
+                .resubscribe(delayMillis = 2_000) { cause ->
                     _state.update { current ->
                         val live = current.conversation ?: return@update current
-                        current.copy(conversation = live.copy(error = cause.message))
+                        current.copy(conversation = live.copy(error = cause?.message))
                     }
-                    delay(2_000)
-                    true
                 }
                 .catch { error ->
                     _state.update { current ->
