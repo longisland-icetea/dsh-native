@@ -1000,6 +1000,16 @@ private fun ConnectionDialog(
                     fontSize = 12.sp,
                     color = MUTED,
                 )
+                Spacer(Modifier.height(6.dp))
+                // Which build this is. Three releases went out stamped 0.1.0, so
+                // there was no way to tell from the phone what was installed --
+                // and no way for a bug report to say either.
+                Text(
+                    text = "Version ${BuildInfo.VERSION_NAME} (${BuildInfo.VERSION_CODE})",
+                    fontSize = 11.sp,
+                    color = MUTED,
+                    fontFamily = FontFamily.Monospace,
+                )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = text,

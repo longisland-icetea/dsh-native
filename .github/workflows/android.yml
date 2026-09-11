@@ -28,6 +28,11 @@ jobs:
       - name: Install Android API 36
         run: sdkmanager "platforms;android-36"
       - uses: gradle/actions/setup-gradle@v6
+      # The version both build paths stamp comes from a shell script, so the
+      # shell tests run before the Gradle ones: a broken derivation there fails
+      # the release while the Kotlin suite stays green.
+      - name: Tool tests
+        run: bash ./tools/test-version.sh
       - name: Unit tests
         run: bash ./gradlew --no-daemon testDebugUnitTest
       - name: Assemble debug
@@ -75,6 +80,9 @@ jobs:
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "No signing secrets; skipping the signed release build." >&2
           fi
+      - name: Tool tests
+        if: steps.signing.outputs.configured == 'true'
+        run: bash ./tools/test-version.sh
       - name: Unit tests
         if: steps.signing.outputs.configured == 'true'
         run: bash ./gradlew --no-daemon testDebugUnitTest

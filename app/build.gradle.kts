@@ -16,6 +16,32 @@ val releaseSigningConfigured = listOf(
     releaseKeyPassword,
 ).all { it.isPresent }
 
+/**
+ * The version this checkout is, derived from its own tags.
+ *
+ * Shelling out to `tools/version.sh` rather than reimplementing it: the
+ * Gradle-free build already calls that script, and two derivations would drift.
+ * CI checks out tags by default, so `git describe` sees them.
+ */
+fun tagVersion(): Pair<String, Int> {
+    val output = providers.exec {
+        commandLine("bash", rootProject.file("tools/version.sh").absolutePath)
+    }.standardOutput.asText.get()
+    var name = "0.0.0-dev"
+    var code = 1
+    output.lineSequence().forEach { line ->
+        when {
+            line.startsWith("VERSION_NAME=") -> name = line.substringAfter('=').trim().trim('"')
+            line.startsWith("VERSION_CODE=") -> code = line.substringAfter('=').trim().toIntOrNull() ?: 1
+        }
+    }
+    return name to code
+}
+
+private val tagVersionPair = tagVersion()
+private val versionNameFromTag = tagVersionPair.first
+private val versionCodeFromTag = tagVersionPair.second
+
 android {
     namespace = "io.github.longislandicetea.dshnative"
     compileSdk = 36
@@ -24,8 +50,11 @@ android {
         applicationId = "io.github.longislandicetea.dshnative"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // From the tag, via the same script the Gradle-free build calls: a
+        // hardcoded pair here meant every published APK claimed to be 0.1.0
+        // (versionCode 1), so three releases were indistinguishable on a device.
+        versionCode = versionCodeFromTag
+        versionName = versionNameFromTag
     }
 
     signingConfigs {
@@ -62,6 +91,33 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // The same version the manifest carries, as a class: generated so the APK's
+    // metadata and what the settings dialog shows cannot disagree.
+    val buildInfoDir = layout.buildDirectory.dir("generated/buildinfo")
+    val generateBuildInfo by tasks.registering {
+        val dir = buildInfoDir
+        val name = versionNameFromTag
+        val code = versionCodeFromTag
+        outputs.dir(dir)
+        doLast {
+            val file = dir.get().file("io/github/longislandicetea/dshnative/BuildInfo.kt").asFile
+            file.parentFile.mkdirs()
+            file.writeText(
+                """
+                package io.github.longislandicetea.dshnative
+
+                /** The version this APK was built as. Generated; see tools/version.sh. */
+                internal object BuildInfo {
+                    const val VERSION_NAME = "$name"
+                    const val VERSION_CODE = $code
+                }
+                """.trimIndent() + "\n",
+            )
+        }
+    }
+    sourceSets.getByName("main").kotlin.srcDir(buildInfoDir)
+    tasks.named("preBuild") { dependsOn(generateBuildInfo) }
 }
 
 dependencies {

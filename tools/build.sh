@@ -32,10 +32,12 @@ ANDROID_JAR="$PLATFORM/android.jar"
 # ...-embeddable artifacts fail with NoClassDefFoundError on
 # org.jetbrains.kotlin.com.intellij.util.keyFMap.KeyFMap.
 KOTLIN_LIB="$HOME/.local/kotlinc/lib"
-# A monotonically increasing versionCode, so two builds are distinguishable on
-# a device. Seconds since the epoch fit Android's 32-bit limit (valid until
-# 2038); a yymmddhhmm stamp does not, which aapt2 rejects as an invalid value.
-BUILD_CODE="$(date -u +%s)"
+# The version comes from the git tag, from the same script the Gradle build uses,
+# so an APK says what release it is whatever built it. The epoch-second counter
+# this replaces was not a version at all: it never named a release, and it is not
+# monotonic across checkouts (a fresh clone at an older commit got a *higher*
+# code). It also overflowed Android's 32-bit field in 2038.
+eval "$("$ROOT/tools/version.sh")"
 COMPOSE_PLUGIN="$KOTLIN_LIB/compose-compiler-plugin.jar"
 SERIALIZATION_PLUGIN="$KOTLIN_LIB/kotlinx-serialization-compiler-plugin.jar"
 OUT="$ROOT/build/manual"
@@ -100,7 +102,7 @@ SYMBOLS="$OUT/R.txt"
   --output-text-symbols "$SYMBOLS" \
   --min-sdk-version 29 \
   --target-sdk-version 36 \
-  --version-code "$BUILD_CODE" --version-name "0.1.0+$BUILD_CODE" \
+  --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
   "$OUT/res.zip"
 
 # ── 2. R.java ────────────────────────────────────────────────────────────────
@@ -124,7 +126,21 @@ echo "== kotlinc (Compose plugin)"
 # trailing newline; otherwise android.jar is appended to the final jar path and
 # every android.* import fails to resolve.
 CP="$(sed 's/$/:/' "$M2/classpath.txt" | tr -d '\n')$ANDROID_JAR:$OUT/classes"
+# The build's own version, as a source file: the APK's manifest and what the
+# settings dialog shows both come from `tools/version.sh`, so they cannot
+# disagree. Generated into the build directory, never the source tree.
+mkdir -p "$OUT/gen-src"
+cat > "$OUT/gen-src/BuildInfo.kt" <<EOF
+package io.github.longislandicetea.dshnative
+
+/** The version this APK was built as. Generated; see tools/version.sh. */
+internal object BuildInfo {
+    const val VERSION_NAME = "$VERSION_NAME"
+    const val VERSION_CODE = $VERSION_CODE
+}
+EOF
 find "$ROOT/app/src/main/java" -name '*.kt' > "$OUT/kt.list"
+echo "$OUT/gen-src/BuildInfo.kt" >> "$OUT/kt.list"
 "$KOTLINC" \
   -classpath "$CP" \
   -jvm-target 17 \
