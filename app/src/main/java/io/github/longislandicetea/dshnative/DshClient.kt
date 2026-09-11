@@ -353,17 +353,30 @@ class DshClient(
         }
     }
 
-    suspend fun prompt(sessionId: String, text: String) {
-        promptContent(sessionId, listOf(PromptContent("text", text)))
+    /**
+     * Send one prompt.
+     *
+     * `mode` decides what happens when the agent is busy: `steer` folds the text
+     * into the running turn, `queue` waits for the next one. The composer steers
+     * (a correction should land while the agent is still working) and the queue
+     * dock's re-send queues, so the choice belongs to the caller.
+     */
+    suspend fun prompt(sessionId: String, text: String, mode: String = "steer") {
+        promptContent(sessionId, listOf(PromptContent("text", text)), mode)
     }
 
-    suspend fun promptContent(sessionId: String, content: List<PromptContent>) {
+    suspend fun promptContent(sessionId: String, content: List<PromptContent>, mode: String = "steer") {
         val args = buildJsonObject {
             put(
                 "request",
                 json.encodeToJsonElement(
                     PromptRequest.serializer(),
-                    PromptRequest(requestId = UUID.randomUUID().toString(), sessionId = sessionId, content = content),
+                    PromptRequest(
+                        requestId = UUID.randomUUID().toString(),
+                        sessionId = sessionId,
+                        mode = mode,
+                        content = content,
+                    ),
                 ),
             )
         }
@@ -522,6 +535,49 @@ class DshClient(
             put("line", JsonPrimitive(line))
         }
         call("commands/execute", args)
+    }
+
+    /**
+     * Live Host-wide control state: pending queues, jobs and projections.
+     *
+     * One generation starts with a `baseline` frame carrying a complete snapshot
+     * per session, then frames that replace one part of it. This is where the
+     * queue and the usage numbers come from -- `session/follow` carries the
+     * transcript, not the control state, and polling the session list for them
+     * would miss every change inside a turn.
+     */
+    fun control(): Flow<MuxFrame> = openStream("session/control", buildJsonObject { })
+
+    /**
+     * Every command the Host offers this session.
+     *
+     * Takes the session id as `agentId`, which is the descriptor's field name --
+     * the same identity the prompt and cancel calls use under a different name.
+     */
+    suspend fun listCommands(sessionId: String): List<CommandInfo> {
+        val value = call("commands/list", buildJsonObject { put("agentId", JsonPrimitive(sessionId)) })
+        return CommandCodec.parse(value)
+    }
+
+    /**
+     * Mutate one still-pending queue item: edit, remove, or steer it.
+     *
+     * The action is the Host's own `QueueAction` shape. A rejected mutation comes
+     * back as an error rather than a silent no-op, which is what the queue row
+     * shows instead of pretending the change landed.
+     */
+    suspend fun updateQueue(sessionId: String, itemId: String, action: JsonObject) {
+        val args = buildJsonObject {
+            put(
+                "request",
+                buildJsonObject {
+                    put("sessionId", JsonPrimitive(sessionId))
+                    put("itemId", JsonPrimitive(itemId))
+                    put("action", action)
+                },
+            )
+        }
+        call("session/updateQueue", args)
     }
 
     /** Archive one session; the Host answers with the complete resulting set. */

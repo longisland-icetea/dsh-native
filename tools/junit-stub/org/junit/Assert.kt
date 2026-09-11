@@ -61,7 +61,20 @@ object Assert {
         if (expected is Array<*> || actual is Array<*>) {
             throw AssertionError("assertEquals does not support arrays in this stub")
         }
-        if (expected != actual) {
+        // Numeric types compare by value, as the real JUnit does:
+        // `assertEquals(100_000, metrics.totalTokens)` with a Long on the right is
+        // one assertion, not a type error. A stub that failed it would push tests
+        // into writing `100_000L` to satisfy the harness rather than the assertion.
+        val same = if (expected is Number && actual is Number) {
+            if (expected is Double || actual is Double || expected is Float || actual is Float) {
+                expected.toDouble() == actual.toDouble()
+            } else {
+                expected.toLong() == actual.toLong()
+            }
+        } else {
+            expected == actual
+        }
+        if (!same) {
             throw AssertionError((message ?: "values differ") + "\n  expected: <$expected>\n  actual:   <$actual>")
         }
     }

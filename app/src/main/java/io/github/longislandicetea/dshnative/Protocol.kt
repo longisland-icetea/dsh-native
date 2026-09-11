@@ -257,6 +257,8 @@ data class ProjectionValues(
     val modelSelection: ProjectionModelSelection? = null,
     val tokenUsage: TokenUsage? = null,
     val contextPressure: ContextPressure? = null,
+    val contextBreakdown: ContextBreakdown? = null,
+    val sessionStats: SessionStats? = null,
 )
 
 @Serializable
@@ -270,14 +272,51 @@ data class TokenUsage(
     val uncachedInputTokens: Long = 0,
     val outputTokens: Long = 0,
     val cacheReadTokens: Long = 0,
+    /** Tokens written into the prompt cache; usually 0 after the first request. */
+    val cacheWriteTokens: Long = 0,
+    /** The reasoning share of the output, when the provider breaks it out. */
+    val reasoningTokens: Long = 0,
 )
 
 @Serializable
 data class ContextPressure(
     val pressureTokens: Long = 0,
     val projectedTokens: Long = 0,
+    /**
+     * The provider's window, or 0 when it reported none. Zero and absent mean the
+     * same thing here -- no window to divide by -- so the meter hides rather than
+     * inventing a denominator.
+     */
     val contextWindow: Long = 0,
 )
+
+/** What the context window currently holds, split three ways. */
+@Serializable
+data class ContextBreakdown(
+    val systemTokens: Long = 0,
+    val toolsTokens: Long = 0,
+    val messageTokens: Long = 0,
+)
+
+/** Session totals: turns, steps, and where the wall-clock time went. */
+@Serializable
+data class SessionStats(
+    val turns: Long = 0,
+    val steps: Long = 0,
+    val llmMs: Long = 0,
+    val toolMs: Long = 0,
+    val ttftMs: Long = 0,
+    val ttftSteps: Long = 0,
+    val decodeMs: Long = 0,
+    val decodeTokens: Long = 0,
+) {
+    /** Tokens per second over decoding time alone, or null when nothing decoded. */
+    fun tokensPerSecond(): Double? =
+        if (decodeMs <= 0) null else decodeTokens.toDouble() / (decodeMs / 1000.0)
+
+    /** Mean time to first token, or null when no step reported one. */
+    fun meanTtftMs(): Long? = if (ttftSteps <= 0) null else ttftMs / ttftSteps
+}
 
 /** Read the projection values out of a session summary or event payload. */
 fun projectionsOf(element: JsonElement?): ProjectionValues? {

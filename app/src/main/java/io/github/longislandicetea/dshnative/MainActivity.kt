@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -51,6 +52,8 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -114,18 +117,18 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.coroutines.launch
 
-private val INK = Color(0xFF16181D)
-private val PANEL = Color(0xFF1E2128)
-private val BUBBLE_USER = Color(0xFF243044)
-private val BUBBLE_ASSISTANT = Color(0xFF1C1F26)
-private val CODE_BG = Color(0xFF12141A)
-private val ACCENT = Color(0xFF6E9BF7)
-private val MUTED = Color(0xFF8A93A5)
-private val WARN = Color(0xFFE5A06B)
+internal val INK = Color(0xFF16181D)
+internal val PANEL = Color(0xFF1E2128)
+internal val BUBBLE_USER = Color(0xFF243044)
+internal val BUBBLE_ASSISTANT = Color(0xFF1C1F26)
+internal val CODE_BG = Color(0xFF12141A)
+internal val ACCENT = Color(0xFF6E9BF7)
+internal val MUTED = Color(0xFF8A93A5)
+internal val WARN = Color(0xFFE5A06B)
 /** Session states: a turn is running, the session wants an answer, or neither. */
-private val STATUS_RUNNING = Color(0xFF4C8DFF)
-private val STATUS_ATTENTION = Color(0xFFE5A06B)
-private val STATUS_DONE = Color(0xFF4CAF72)
+internal val STATUS_RUNNING = Color(0xFF4C8DFF)
+internal val STATUS_ATTENTION = Color(0xFFE5A06B)
+internal val STATUS_DONE = Color(0xFF4CAF72)
 
 private val scheme = darkColorScheme(
     primary = ACCENT,
@@ -670,8 +673,17 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 // mid-conversation; both live behind this chip rather
                                 // than in the settings dialog, which is about the
                                 // connection.
-                                if (state.conversation != null) {
+                                val openConversation = state.conversation
+                                if (openConversation != null) {
                                     Spacer(Modifier.width(8.dp))
+                                    // The window's occupancy sits beside the model
+                                    // because both answer "what am I talking to
+                                    // right now", and the ring is the one warning
+                                    // before the harness compacts the conversation.
+                                    state.metrics[openConversation.sessionId]?.let { metrics ->
+                                        ContextMeter(metrics)
+                                    }
+                                    Spacer(Modifier.width(6.dp))
                                     Text(
                                         text = selectionLabel(state.selection ?: state.catalog?.default),
                                         color = ACCENT,
@@ -1027,10 +1039,19 @@ private fun ConnectionDialog(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationView(conversation: Conversation, state: AppState, holder: AppStateHolder) {
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
+    // Derived from the draft on every recomposition: the menu has to disappear
+    // the moment the draft stops being a command line, and a remembered copy
+    // would lag a keystroke behind.
+    val commandSuggestions = if (state.editingQueued == null) {
+        CommandMenu.suggestions(input, state.commands)
+    } else {
+        emptyList()
+    }
     val total = conversation.items.size
     val liveText = conversation.liveText
     // Follow the *newest* item, not the item count. Keying on the count made
@@ -1219,7 +1240,28 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                     }
                 }
             }
-            items(conversation.items, key = { it.key }) { item -> TranscriptRow(item, onOpenFile = holder::previewFile) }
+            items(conversation.items, key = { it.key }) { item ->
+                TranscriptRow(item, onOpenFile = holder::previewFile)
+                // The turn's cost goes under the last row of that turn, and only
+                // once the turn is over: the running turn's numbers are still
+                // moving, and a figure that changes while being read is worse
+                // than no figure.
+                val turn = turnOf(item.key)
+                if (turn != null && !conversation.running && turnOf(conversation.items.last().key) == turn) {
+                    state.turnUsage[turn]?.let { usage ->
+                        val metrics = state.metrics[conversation.sessionId]
+                        var showUsage by remember(item.key) { mutableStateOf(false) }
+                        TurnUsageRow(
+                            usage = usage,
+                            stats = metrics?.stats,
+                            onOpen = { showUsage = true },
+                        )
+                        if (showUsage) {
+                            TurnUsageDialog(usage, metrics?.stats, onDismiss = { showUsage = false })
+                        }
+                    }
+                }
+            }
             if (liveText.isNotEmpty()) {
                 item(key = "live") { AssistantBubble(liveText, streaming = true) }
             }
@@ -1272,6 +1314,32 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
             PendingCard(interaction, holder)
         }
 
+        // Waiting messages, then the command menu: both belong to the composer
+        // rather than the transcript, and both have to be visible without a tap
+        // because they change what sending will do.
+        val queued = state.queues[conversation.sessionId].orEmpty()
+        QueueDock(
+            items = queued,
+            running = conversation.running,
+            editing = state.editingQueued,
+            error = state.queueError,
+            onSteer = { holder.queueAction(it, QueueAction.steer(), "steer") },
+            onEdit = holder::editQueued,
+            onRemove = { holder.queueAction(it, QueueAction.remove(), "remove") },
+            onCancelEdit = holder::cancelQueueEdit,
+        )
+        CommandMenuPanel(
+            suggestions = commandSuggestions,
+            onPick = { suggestion ->
+                input = CommandMenu.lineFor(suggestion.command)
+                if (suggestion.command.runsOnPick) {
+                    val line = input.trim()
+                    input = ""
+                    holder.runCommand(line)
+                }
+            },
+        )
+
         HorizontalDivider(color = Color(0xFF2A2E38))
         Row(
             Modifier.fillMaxWidth().background(PANEL).padding(8.dp),
@@ -1309,19 +1377,60 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                 ComposerAction.Stop -> IconButton(onClick = holder::cancel) {
                     Icon(Icons.Filled.Stop, contentDescription = "Cancel turn", tint = WARN)
                 }
-                ComposerAction.Send, ComposerAction.Idle -> IconButton(
-                    onClick = {
+                ComposerAction.Send, ComposerAction.Idle -> {
+                    val editing = state.editingQueued
+                    var showQueueMenu by remember { mutableStateOf(false) }
+                    fun submit(mode: String) {
                         val text = input
                         input = ""
-                        holder.send(text)
-                    },
-                    enabled = input.isNotBlank(),
-                ) {
-                    Icon(
-                        Icons.Filled.Send,
-                        contentDescription = "Send",
-                        tint = if (input.isNotBlank()) ACCENT else MUTED,
-                    )
+                        // Editing a queued row keeps the message in the queue: a
+                        // save must not turn into a second message, so the action
+                        // follows the mode the composer is in.
+                        when {
+                            editing != null -> holder.queueAction(editing, QueueAction.edit(text), "edit")
+                            isCommand(state, text) -> holder.runCommand(text.trim())
+                            // Default is steer, so a correction lands while the
+                            // agent is working; queueing is the deliberate choice
+                            // behind a long press, for "after this turn".
+                            mode == "queue" -> holder.enqueue(text)
+                            else -> holder.send(text)
+                        }
+                    }
+                    Box {
+                        IconButton(
+                            onClick = { submit("steer") },
+                            enabled = input.isNotBlank(),
+                            // Long press offers the other delivery mode, but only
+                            // while a turn is running: with nothing running, queue
+                            // and steer are the same thing.
+                            modifier = if (conversation.running && editing == null) {
+                                Modifier.combinedClickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { submit("steer") },
+                                    onLongClick = { showQueueMenu = true },
+                                )
+                            } else {
+                                Modifier
+                            },
+                        ) {
+                            Icon(
+                                Icons.Filled.Send,
+                                contentDescription = if (editing != null) "Save queued message" else "Send",
+                                tint = if (input.isNotBlank()) ACCENT else MUTED,
+                            )
+                        }
+                        DropdownMenu(expanded = showQueueMenu, onDismissRequest = { showQueueMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Steer now", fontSize = 13.sp) },
+                                onClick = { showQueueMenu = false; submit("steer") },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Queue for next turn", fontSize = 13.sp) },
+                                onClick = { showQueueMenu = false; submit("queue") },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1701,8 +1810,29 @@ private fun ProseBlock(block: MarkdownBlock.Prose) {
 }
 
 /** Cell padding, shared so the header and body columns line up. */
-private val TABLE_CELL_PADDING = 8.dp
-private val TABLE_RULE = Color(0xFF2A2F38)
+/**
+ * The turn a transcript row belongs to, read from its key.
+ *
+ * Rows are keyed `turn:<turn>:<seq>`, which is the only place the turn number is
+ * retained -- the renderer does not model turns, it draws a stream of rows.
+ */
+/**
+ * Whether this draft is a command line the Host knows.
+ *
+ * Checked against the loaded command list rather than by shape alone: sending
+ * `/etc/hosts` as a command would fail, and the reader meant it as prose.
+ */
+internal fun isCommand(state: AppState, draft: String): Boolean {
+    val line = CommandMenu.commandLine(draft) ?: return false
+    val name = line.substringBefore(' ').drop(1)
+    return state.commands.any { it.name == name }
+}
+
+internal fun turnOf(key: String): Int? =
+    if (!key.startsWith("turn:")) null else key.removePrefix("turn:").substringBefore(':').toIntOrNull()
+
+internal val TABLE_CELL_PADDING = 8.dp
+internal val TABLE_RULE = Color(0xFF2A2F38)
 private val TABLE_STRIPE = Color(0xFF1B1F27)
 
 /**

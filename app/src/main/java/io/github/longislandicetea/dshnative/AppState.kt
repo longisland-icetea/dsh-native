@@ -20,7 +20,10 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.contentOrNull
 import android.util.Log
 
@@ -462,6 +465,40 @@ data class AppState(
      * than for a timer; this is what releases it if the stream is genuinely gone.
      */
     val workspaceFailed: Boolean = false,
+    /**
+     * Usage, context pressure and session totals per session.
+     *
+     * Filled from the `session/control` baseline and its projection frames, and
+     * seeded from each session summary on a list refresh so the numbers are there
+     * before the stream has spoken. Keyed by session because the control stream is
+     * Host-wide, not per-session.
+     */
+    val metrics: Map<String, Metrics> = emptyMap(),
+    /** Pending queue per session, as the Host reports it. */
+    val queues: Map<String, List<QueuedItem>> = emptyMap(),
+    /**
+     * Tokens per turn, for the open conversation: turn number -> usage.
+     *
+     * Accumulated from each `assistant/message`'s own `usage`, which is the only
+     * per-turn figure the Host sends -- the session projects totals, not turns.
+     * Kept as a separate map rather than folded into the transcript items so the
+     * reducer stays a pure function of one event.
+     */
+    val turnUsage: Map<Int, TokenUsage> = emptyMap(),
+    /** Seqs already folded into [turnUsage], so a replayed snapshot cannot double-count. */
+    val countedUsageSeqs: Set<Long> = emptySet(),
+    /** Slash commands the Host offers for the open conversation. */
+    val commands: List<CommandInfo> = emptyList(),
+    /**
+     * A message being edited in the composer, or null when composing a new one.
+     *
+     * Editing reuses the composer rather than growing an input inside the queue
+     * row: on a phone the real keyboard is the largest text surface available, and
+     * a 30-character-tall row is the wrong place to rewrite a paragraph.
+     */
+    val editingQueued: QueuedItem? = null,
+    /** Last queue failure, shown on the dock rather than swallowed. */
+    val queueError: String? = null,
     /** Routable models, loaded when the picker first opens. */
     val catalog: ModelCatalog? = null,
     /** Provider/model/effort currently in force for the open conversation. */
@@ -578,6 +615,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var followJob: Job? = null
     private var eventsJob: Job? = null
     private var workspaceJob: Job? = null
+    private var controlJob: Job? = null
     /** Bound by the `$events` ready frame; every answer must name it. */
     private var eventClientId: String? = null
 
@@ -614,6 +652,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
         openEvents(created)
         openWorkspaces(created)
+        openControl(created)
         refreshSessions()
     }
 
@@ -692,6 +731,37 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * `status` and `activity` are one field each and are patched in place, which is
      * what keeps the list live without a `session/list` round trip per event.
      */
+    /**
+     * Add one assistant message's usage to its turn.
+     *
+     * A turn has several steps, each with its own usage, so the turn's cost is
+     * their sum. The Host's session totals cannot answer "which turn was
+     * expensive", which is the question a reader actually has.
+     */
+    private fun accumulateTurnUsage(
+        frame: FollowFrame,
+        current: Map<Int, TokenUsage>,
+        counted: Set<Long>,
+    ): Map<Int, TokenUsage> {
+        val event = (frame as? FollowFrame.Event)?.event ?: return current
+        if (event.type != "assistant/message") return current
+        // One event contributes once, however many times a reconnect replays it.
+        if (event.seq in counted) return current
+        val data = event.data as? JsonObject ?: return current
+        val turn = (data["turn"] as? JsonPrimitive)?.intOrNull ?: return current
+        val fresh = runCatching {
+            DshWire.json.decodeFromJsonElement(TokenUsage.serializer(), data["usage"] ?: return current)
+        }.getOrNull() ?: return current
+        val previous = current[turn] ?: TokenUsage()
+        return current + (turn to TokenUsage(
+            uncachedInputTokens = previous.uncachedInputTokens + fresh.uncachedInputTokens,
+            outputTokens = previous.outputTokens + fresh.outputTokens,
+            cacheReadTokens = previous.cacheReadTokens + fresh.cacheReadTokens,
+            cacheWriteTokens = previous.cacheWriteTokens + fresh.cacheWriteTokens,
+            reasoningTokens = previous.reasoningTokens + fresh.reasoningTokens,
+        ))
+    }
+
     private fun applySessionDelta(active: DshClient, event: String, args: List<JsonElement>) {
         when (val delta = SessionDelta.from(event, args)) {
             is SessionDelta.Running -> _state.update { current ->
@@ -916,6 +986,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         eventsJob = null
         workspaceJob?.cancel()
         workspaceJob = null
+        controlJob?.cancel()
+        controlJob = null
         eventClientId = null
         _state.update { it.copy(pending = emptyList()) }
         client?.stop()
@@ -923,6 +995,152 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         _state.update {
             it.copy(connected = false, conversation = if (quiet) it.conversation else null)
         }
+    }
+
+    /**
+     * Follow the Host's live control state: queues, projections and jobs.
+     *
+     * Separate from the events stream because it is a different kind of fact. The
+     * events stream says what happened (a waterfall to answer, a session's running
+     * flag); this says what a session's state *is* -- what is queued, how full the
+     * window is -- and its frames are complete snapshots rather than deltas, so a
+     * dropped frame is repaired by the next one.
+     */
+    private fun openControl(active: DshClient) {
+        controlJob?.cancel()
+        controlJob = scope.launch(Dispatchers.IO) {
+            val stream: Flow<MuxFrame> = active.control()
+                .resubscribe(delayMillis = 2_000) { cause ->
+                    record("control ended: ${cause?.message ?: "stream closed"}; resubscribing")
+                }
+            stream
+                .catch { error: Throwable -> record("control stopped: ${error.message}") }
+                .collect { frame: MuxFrame ->
+                    if (frame !is MuxFrame.Item) return@collect
+                    applyControl(frame.value)
+                }
+        }
+    }
+
+    /** Fold one `session/control` frame into the per-session state it carries. */
+    private fun applyControl(value: JsonElement) {
+        val obj = value as? JsonObject ?: return
+        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+            "baseline" -> {
+                val snapshot = obj["value"] as? JsonObject ?: return
+                val metrics = mutableMapOf<String, Metrics>()
+                (snapshot["projections"] as? JsonObject)?.forEach { (sessionId, projection) ->
+                    val bag = (projection as? JsonObject)?.get("values") as? JsonObject
+                    val parsed = runCatching {
+                        DshWire.json.decodeFromJsonElement(ProjectionValues.serializer(), bag ?: JsonObject(emptyMap()))
+                    }.getOrNull()
+                    Metrics.from(parsed).takeUnless { it.isEmpty }?.let { metrics[sessionId] = it }
+                }
+                val queues = mutableMapOf<String, List<QueuedItem>>()
+                (snapshot["queues"] as? JsonObject)?.forEach { (sessionId, items) ->
+                    val parsed = QueueCodec.parse(items as? JsonArray)
+                    if (parsed.isNotEmpty()) queues[sessionId] = parsed
+                }
+                _state.update { it.copy(metrics = it.metrics + metrics, queues = it.queues + queues) }
+                record("control baseline: ${metrics.size} sessions with usage, ${queues.size} with a queue")
+            }
+            // A queue frame is that session's whole queue, so an empty array is
+            // the removal -- there is no per-item delta to apply.
+            "queue" -> {
+                val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
+                val items = QueueCodec.parse(obj["items"] as? JsonArray)
+                _state.update {
+                    it.copy(queues = if (items.isEmpty()) it.queues - sessionId else it.queues + (sessionId to items))
+                }
+            }
+            "projection" -> {
+                val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
+                val key = obj["key"]?.jsonPrimitive?.contentOrNull ?: return
+                val parsed = runCatching {
+                    DshWire.json.decodeFromJsonElement(
+                        ProjectionValues.serializer(),
+                        buildJsonObject { put(key, obj["value"] ?: JsonNull) },
+                    )
+                }.getOrNull() ?: return
+                val incoming = Metrics.from(parsed)
+                if (incoming.isEmpty) return
+                _state.update { current ->
+                    // One key per frame, so merge into what is already known
+                    // rather than replacing: usage and pressure arrive separately.
+                    val existing = current.metrics[sessionId] ?: Metrics()
+                    current.copy(
+                        metrics = current.metrics + (sessionId to Metrics(
+                            usage = incoming.usage ?: existing.usage,
+                            pressure = incoming.pressure ?: existing.pressure,
+                            breakdown = incoming.breakdown ?: existing.breakdown,
+                            stats = incoming.stats ?: existing.stats,
+                        )),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Load the commands the Host offers this session, for the `/` menu. */
+    private fun loadCommands(sessionId: String) {
+        val active = client ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.listCommands(sessionId) }
+                .onSuccess { list ->
+                    record("commands: ${list.size}")
+                    _state.update { it.copy(commands = list) }
+                }
+                .onFailure { record("commands/list failed: ${it.message}") }
+        }
+    }
+
+    /** Queue a message for the next turn: what the composer does while busy. */
+    fun enqueue(text: String) {
+        val active = client ?: return
+        val conversation = _state.value.conversation ?: return
+        if (text.isBlank()) return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.prompt(conversation.sessionId, text, mode = "queue") }
+                .onSuccess { record("queued") }
+                .onFailure { error ->
+                    _state.update { it.copy(queueError = "Queue failed: ${error.message}") }
+                }
+        }
+    }
+
+    /** Mutate one pending queue row; the Host's snapshot is what redraws it. */
+    fun queueAction(item: QueuedItem, action: JsonObject, what: String) {
+        val active = client ?: return
+        val sessionId = _state.value.conversation?.sessionId ?: return
+        scope.launch(Dispatchers.IO) {
+            runCatching { active.updateQueue(sessionId, item.id, action) }
+                .onSuccess {
+                    record("queue $what: ${item.id.take(8)}")
+                    _state.update { it.copy(queueError = null, editingQueued = null) }
+                }
+                .onFailure { error ->
+                    // The web client's copy for this is worth matching: the row may
+                    // already have been claimed by the agent, which is not a bug.
+                    _state.update {
+                        it.copy(queueError = "$what failed: this message may have already started sending.")
+                    }
+                    record("queue $what failed: ${error.message}")
+                }
+        }
+    }
+
+    /** Begin editing a queued message in the composer. */
+    fun editQueued(item: QueuedItem) {
+        if (!item.editable) {
+            _state.update { it.copy(queueError = "Only text messages can be edited.") }
+            return
+        }
+        _state.update { it.copy(editingQueued = item, queueError = null) }
+    }
+
+    /** Abandon an in-progress queue edit. */
+    fun cancelQueueEdit() {
+        _state.update { it.copy(editingQueued = null, queueError = null) }
     }
 
     fun refreshSessions() {
@@ -940,7 +1158,22 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 val result = runCatching { active.listSessionsDetailed() }
                 result.onSuccess { (sessions, bytes) ->
                     record("session/list ok: ${sessions.size} sessions, ${bytes}B")
-                    _state.update { it.copy(sessions = sessions, sessionsBytes = bytes, sessionsError = null) }
+                    // Seed usage from the summaries: the control stream is the
+                    // live source, but a reader who opens the drawer before its
+                    // baseline lands should not see an empty meter.
+                    val seeded = sessions.mapNotNull { summary ->
+                        Metrics.from(projectionsOf(summary.projections))
+                            .takeUnless { it.isEmpty }
+                            ?.let { summary.sessionId to it }
+                    }.toMap()
+                    _state.update {
+                        it.copy(
+                            sessions = sessions,
+                            sessionsBytes = bytes,
+                            sessionsError = null,
+                            metrics = seeded + it.metrics,
+                        )
+                    }
                     return@launch
                 }.onFailure { error ->
                     val message = "${error::class.simpleName}: ${error.message}"
@@ -994,11 +1227,16 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     running = session.running,
                     workspaceRoot = session.cwd,
                 ),
+                // Turn numbers restart per session, so a stale map would label
+                // this session's turn 2 with another session's tokens.
+                turnUsage = emptyMap(),
+                countedUsageSeqs = emptySet(),
                 selection = selection,
             )
         }
         openFollow(session.sessionId, session.title)
         loadCatalog()
+        loadCommands(session.sessionId)
     }
 
     /**
@@ -1160,9 +1398,22 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             val conversation = current.conversation
             if (conversation == null || conversation.sessionId != sessionId) return@update current
             when (frame) {
-                is MuxFrame.Item -> current.copy(
-                    conversation = merge(conversation, FollowCodec.decode(frame.value)),
-                )
+                is MuxFrame.Item -> {
+                    val decoded = FollowCodec.decode(frame.value)
+                    current.copy(
+                        conversation = merge(conversation, decoded),
+                        // Decoded once and handed to both: a reconnect replays the
+                        // same assistant messages, and accumulating them twice
+                        // would inflate every turn's cost.
+                        turnUsage = accumulateTurnUsage(decoded, current.turnUsage, current.countedUsageSeqs),
+                        countedUsageSeqs = current.countedUsageSeqs +
+                            listOfNotNull(
+                                (decoded as? FollowFrame.Event)?.event
+                                    ?.takeIf { it.type == "assistant/message" }
+                                    ?.seq,
+                            ),
+                    )
+                }
                 is MuxFrame.End -> current.copy(conversation = conversation.copy(running = false))
                 is MuxFrame.Failure -> current.copy(
                     conversation = conversation.copy(error = "${frame.code}: ${frame.message}"),

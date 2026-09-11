@@ -32,6 +32,8 @@ Checked, and not gaps:
   text, plan-review classification, validation, and the exact answer payload.
 - Deliverable preview, image zoom, jump-to-newest, Load older, transport log,
   new-session button, reconnect and resubscribe.
+- Token usage, context pressure with its breakdown, the pending-message queue
+  with steer/edit/remove, and the `/` command menu built from `commands/list`.
 
 ## High impact
 
@@ -50,38 +52,32 @@ The web also renders a `system/message` as a disclosure ("System prompt" /
 parses those events for the session title and nothing else, so a system-prompt
 update is invisible in the conversation.
 
-### 2. Token usage and context pressure are invisible
+### 2. Token usage and context pressure
 
-The web shows a per-turn usage dialog (uncached input, cached input, cache write,
-cache hit %, output, `({tokens} reasoning)`, provider/model), a turn time and
-speed dialog (total run time, TTFT, tokens/s), a session statistics dialog, and a
-composer **context meter** — a ring fed by the `contextPressure` projection that
-opens a breakdown of system prompt / tool definitions / conversation messages.
-None of it exists here, and none of it needs a new API: the data rides
-`assistant/message.usage` and the `tokenUsage`, `contextPressure` and
-`contextBreakdown` projections, which the app already receives on `session/page`
-and the follow snapshot. Context pressure is the one that changes behaviour on a
-phone: it is how a reader knows the conversation is about to be compacted.
+**Done.** A context ring sits beside the model chip, fed by `contextPressure` and
+opening a breakdown of conversation / tool definitions / system prompt with the
+session's totals. Each turn's cost appears under the turn it belongs to, from
+`assistant/message.usage`, and opens the per-turn dialog (cached input, cache
+write, output, reasoning share, cache-hit percentage). Nothing is polled: the
+`session/control` stream carries the projections, and the session list seeds them.
 
-### 3. The message queue is invisible and uneditable
+### 3. The message queue
 
-The app always sends `mode: "steer"` now, and the Host turns a submission that
-missed the steer window into the next queue item — so text is never lost. But
-the queue is a black hole here: the web has a queue dock with
-`{n} queued messages`, and per-row **edit**, **remove** and **steer** actions over
-`session/updateQueue`. A message that fell through to the queue cannot be seen,
-corrected or cancelled from this app. It is arguably worse than not sending:
-the reader believes they steered, and the turn ends without their correction.
+**Done.** A queue dock above the composer lists what is waiting, from the Host's
+own `session/control` snapshots, with per-row **steer**, **edit** and **remove**
+over `session/updateQueue`. Editing reuses the composer rather than growing an
+input inside the row, and a steered message appears as a `STEERING` row until the
+Host retires it into the log — the acknowledgement that it arrived. Sending while
+the agent is busy steers by default; a long press on send offers "queue for next
+turn".
 
-### 4. Slash commands are one hardcoded button
+### 4. Slash commands
 
-`/compact` is wired to a button; nothing else is reachable. The Host ships a
-command registry (`commands/list`) with six built-ins — `compact`, `export`,
-`feedback`, `goal`, `permission`, `plan` — and the web renders them in a `/`
-candidate menu with search, keyboard navigation and per-command option popups.
-The app never calls `commands/list`, so it cannot show what exists. `/export`,
-`/permission` and `/plan` are all useful on a phone and all currently
-unreachable.
+**Done.** Typing `/` at the start of the composer opens a menu built from the
+Host's `commands/list` — six built-ins in this deployment, and any the deployment
+adds. A command that declares no input (`compact`, `export`) runs on pick; one
+that declares a hint (`permission`, `plan`, `goal`, `feedback`) inserts its name
+and waits for its argument, with the hint shown beside it.
 
 ### 5. No attachments: no images and no files
 
@@ -187,8 +183,11 @@ Worth stating so they are not mistaken for omissions:
   "something arrived that this build does not render" row would have made the gap
   visible the first time it happened.
 
-## If anything here gets done
+## Remaining, in the order worth doing
 
-The order this list would be worked in, judging by what a phone reader loses
-today: reasoning blocks (1), the queue dock (3), usage and context pressure (2),
-attachments (5), then `commands/list` plus the command menu (4).
+Reasoning blocks are now the largest single loss: the block parser keeps only
+`type == "text"`, so the model's thinking never reaches the transcript, and
+`system/message` is parsed for the session title alone. After that: attachments
+(no way to send a screenshot), `tool/result.meta` (diffs and structured results
+are in the events already), then session and workspace management (rename, fork,
+search, delete).
