@@ -130,6 +130,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Which control the composer shows, as the web client decides it. */
+internal enum class ComposerAction { Stop, Send, Idle }
+
+/**
+ * What the single composer button does right now.
+ *
+ * While a turn runs with an empty box it stops the turn; the moment there is
+ * something typed -- or the turn is over -- it sends. Typing therefore replaces
+ * stop with send, which is the point: a half-written follow-up can never be lost
+ * to a stray tap on stop, and the reader never has to clear the box to interrupt.
+ */
+internal fun composerAction(running: Boolean, input: String): ComposerAction = when {
+    running && input.isBlank() -> ComposerAction.Stop
+    input.isBlank() -> ComposerAction.Idle
+    else -> ComposerAction.Send
+}
+
 /** What the top-bar chip says: the model in force, with its effort when set. */
 private fun selectionLabel(selection: ModelSelection?): String {
     val model = selection?.model?.takeIf { it.isNotBlank() } ?: return "model: default"
@@ -623,11 +640,6 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 Icon(Icons.Filled.Notifications, contentDescription = "Waiting", tint = WARN)
                             }
                         }
-                        if (state.conversation?.running == true) {
-                            IconButton(onClick = holder::cancel) {
-                                Icon(Icons.Filled.Stop, contentDescription = "Cancel turn")
-                            }
-                        }
                         IconButton(onClick = { showSettings = true }) {
                             Icon(Icons.Filled.Settings, contentDescription = "Connection")
                         }
@@ -936,6 +948,36 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         focusManager.clearFocus(force = true)
     }
 
+    // Paging up must leave the reader where they were. Prepending a page shifts
+    // every index, so the item under the top of the viewport is remembered by *key*
+    // before the page is requested and scrolled back to afterwards -- otherwise the
+    // transcript jumps to the oldest line of the new page and the reader has to
+    // find their place again on every load.
+    // The list is not only messages: the paging button, an error line, and the
+    // streaming bubble can each sit at the top, so a list index is not a message
+    // index. Counting the leading items is what keeps the anchor pointing at the
+    // row the reader is actually looking at.
+    val leadingItems =
+        (if (conversation.hasMore) 1 else 0) +
+            (if (conversation.error != null) 1 else 0) +
+            (if (liveText.isNotEmpty()) 1 else 0)
+
+    var anchorKey by remember(conversation.sessionId) { mutableStateOf<String?>(null) }
+    var anchorOffset by remember(conversation.sessionId) { mutableStateOf(0) }
+    var pendingAnchor by remember(conversation.sessionId) { mutableStateOf(false) }
+
+    LaunchedEffect(total, pendingAnchor) {
+        if (!pendingAnchor) return@LaunchedEffect
+        val key = anchorKey ?: return@LaunchedEffect
+        val index = conversation.items.indexOfFirst { it.key == key }
+        if (index >= 0) {
+            // The same item, at the same distance from the top: the content above it
+            // moved, the viewport did not.
+            listState.scrollToItem(index, anchorOffset)
+        }
+        pendingAnchor = false
+    }
+
     Column(Modifier.fillMaxSize().imePadding()) {
         LazyColumn(
             state = listState,
@@ -945,7 +987,21 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         ) {
             if (conversation.hasMore) {
                 item {
-                    TextButton(onClick = holder::loadOlder, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(
+                        onClick = {
+                            // Remember the reader's place before the page lands: the
+                            // item at the top of the viewport, by key, and how far
+                            // into it the viewport starts.
+                            val index = listState.firstVisibleItemIndex - leadingItems
+                            conversation.items.getOrNull(index)?.let { first ->
+                                anchorKey = first.key
+                                anchorOffset = listState.firstVisibleItemScrollOffset
+                                pendingAnchor = true
+                            }
+                            holder.loadOlder()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text("Load older", fontSize = 12.sp)
                     }
                 }
@@ -985,15 +1041,24 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                     unfocusedIndicatorColor = Color.Transparent,
                 ),
             )
-            IconButton(
-                onClick = {
-                    val text = input
-                    input = ""
-                    holder.send(text)
-                },
-                enabled = input.isNotBlank(),
-            ) {
-                Icon(Icons.Filled.Send, contentDescription = "Send", tint = if (input.isNotBlank()) ACCENT else MUTED)
+            when (composerAction(conversation.running, input)) {
+                ComposerAction.Stop -> IconButton(onClick = holder::cancel) {
+                    Icon(Icons.Filled.Stop, contentDescription = "Cancel turn", tint = WARN)
+                }
+                ComposerAction.Send, ComposerAction.Idle -> IconButton(
+                    onClick = {
+                        val text = input
+                        input = ""
+                        holder.send(text)
+                    },
+                    enabled = input.isNotBlank(),
+                ) {
+                    Icon(
+                        Icons.Filled.Send,
+                        contentDescription = "Send",
+                        tint = if (input.isNotBlank()) ACCENT else MUTED,
+                    )
+                }
             }
         }
     }
