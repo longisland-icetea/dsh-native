@@ -47,14 +47,64 @@ data class DshEndpoint(val host: String, val port: Int = 3080) {
     val wsUrl get() = "ws://$host:$port${DshWire.MUX_PATH}"
 
     companion object {
+        /**
+         * Fold the full-width punctuation a CJK keyboard produces onto ASCII.
+         *
+         * A Chinese IME emits `。` and `：` for `.` and `:`, so typing
+         * `192.168.1.5:3080` on a phone yields `192。168。1。5：3080`. That is not a
+         * typo the reader can see -- the glyphs look right until compared side by
+         * side -- so the parser accepts both rather than rejecting the address.
+         */
+        internal fun normalizePunctuation(input: String): String = buildString(input.length) {
+            input.forEach { ch ->
+                append(
+                    when (ch) {
+                        '。', '．', '｡' -> '.'
+                        '：', '︓' -> ':'
+                        '／', '∕' -> '/'
+                        '－', '—', '–' -> '-'
+                        // A full-width space is still a separator, and trimming later
+                        // would otherwise leave it inside the address.
+                        '\u3000' -> ' '
+                        else -> if (ch.code in 0xFF01..0xFF5E) (ch.code - 0xFEE0).toChar() else ch
+                    },
+                )
+            }
+        }
+
         /** Accepts `host`, `host:port`, or a pasted URL; rejects anything but http/ws. */
         fun parse(input: String): DshEndpoint? {
-            val trimmed = input.trim().removeSuffix("/")
+            val trimmed = normalizePunctuation(input).trim().removeSuffix("/")
             if (trimmed.isEmpty()) return null
+            // Whether a scheme was typed decides how to read a missing port.
+            // Prepending `http://` unconditionally made a bare host resolve to
+            // OkHttp's default port for http -- 80 -- so `192.168.1.20` silently
+            // became `192.168.1.20:80` instead of the harness's 3080.
             val withScheme = if (trimmed.contains("://")) trimmed else "http://$trimmed"
             val url = runCatching { withScheme.toHttpUrl() }.getOrNull() ?: return null
             if (url.scheme != "http") return null
-            return DshEndpoint(url.host, if (url.port != 0) url.port else 3080)
+            // OkHttp fills in 80 for `http://` with no port, so the *typed* address
+            // decides: a port someone wrote is honoured, otherwise this client's
+            // default applies -- `http://host` means the harness, not port 80.
+            val port = if (hasExplicitPort(trimmed)) url.port else DEFAULT_PORT
+            return DshEndpoint(url.host, port)
+        }
+
+        /** The harness's port, and the default a typed address gets. */
+        const val DEFAULT_PORT = 3080
+
+        /**
+         * Whether the address names a port itself.
+         *
+         * A trailing `:digits` after the host. An IPv6 literal in brackets is
+         * skipped so its own colons are not mistaken for a port separator.
+         */
+        private fun hasExplicitPort(address: String): Boolean {
+            val afterHost = address.substringAfterLast(']', address)
+            val colon = afterHost.lastIndexOf(':')
+            if (colon < 0) return false
+            val digits = afterHost.substring(colon + 1)
+            return digits.isNotEmpty() && digits.all { it.isDigit() }
         }
     }
 }
