@@ -86,3 +86,20 @@ Re-run it after a DSH upgrade that changes the icon, and commit the PNGs.
 `tools/*.py` that patch sources use a `sub()` helper that raises when its anchor
 is missing. `str.replace` silently no-ops on a missing anchor, which twice
 produced a "successful" edit and a build of unchanged code. Keep using it.
+
+## Release builds
+
+`./tools/build-release.sh` runs R8 over the debug build's classes and packages the
+result, so a minified build can be installed and exercised before a tag is pushed.
+
+Two things it exists to catch, both found this way and neither visible in a debug
+build:
+
+- R8 removes `kotlinx-coroutines-android`'s `AndroidDispatcherFactory`, which is
+  reached through `META-INF/services` rather than by reference. The app then died on
+  `MainActivity.onCreate` with "Module with the Main dispatcher is missing".
+- Packaging only `*.dex` left `META-INF/services` out of the APK, which breaks the
+  same lookup again even once the class is kept.
+
+Gradle merges the keep rules that prevent the first from the libraries' AARs;
+invoking R8 directly does not, so they live in `app/proguard-rules.pro`.

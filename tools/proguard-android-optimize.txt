@@ -1,0 +1,67 @@
+# Mirrors the rules Android Gradle Plugin applies to every release build under
+# `proguard-android-optimize.txt`, which AGP ships as a class rather than as a
+# file, so it cannot be extracted and reused here.
+#
+# They matter to this app for two reasons: the manifest-declared components are
+# looked up by name at runtime, and the protocol layer decodes JSON by hand
+# against Kotlin types. Project-specific keeps live in `app/proguard-rules.pro`.
+#
+# Kept deliberately close to the upstream text: this is not a place to add
+# project rules, and a rule that is needed only by this app belongs in the other
+# file where the Gradle build also reads it.
+
+# Annotations carry the metadata kotlinx.serialization and Compose read.
+# `InnerClasses` is only valid alongside `EnclosingMethod`, so the two travel
+# together -- R8 refuses the pair otherwise.
+-keepattributes *Annotation*,InnerClasses,EnclosingMethod
+
+# Native methods are resolved by name.
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
+# Views inflated from XML are constructed reflectively.
+-keepclassmembers public class * extends android.view.View {
+    public <init>(android.content.Context);
+    public <init>(android.content.Context, android.util.AttributeSet);
+    public <init>(android.content.Context, android.util.AttributeSet, int);
+    public void set*(...);
+}
+
+# Activities, services and receivers declared in the manifest are instantiated by
+# name, and every View subclass with an (Context, AttributeSet) constructor is a
+# candidate for XML inflation.
+-keep public class * extends android.app.Activity
+-keep public class * extends android.app.Application
+-keep public class * extends android.app.Service
+-keep public class * extends android.content.BroadcastReceiver
+-keep public class * extends android.content.ContentProvider
+-keep public class * extends android.app.backup.BackupAgentHelper
+-keep public class * extends android.preference.Preference
+-keep public class * extends android.view.View {
+    public <init>(android.content.Context);
+    public <init>(android.content.Context, android.util.AttributeSet);
+    public <init>(android.content.Context, android.util.AttributeSet, int);
+    public void set*(...);
+}
+
+# Parcelable CREATOR fields are read reflectively.
+-keepclassmembers class * implements android.os.Parcelable {
+    public static final android.os.Parcelable$Creator *;
+}
+
+# Serialization of enum values uses the synthetic $VALUES field.
+-keepclassmembers enum * {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
+# R8's default optimisations for the Android platform, minus the debug info the
+# release build would otherwise keep.
+-dontusemixedcaseclassnames
+-dontskipnonpubliclibraryclasses
+-verbose
+-dontoptimize
+-dontpreverify
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
