@@ -1,6 +1,7 @@
 package io.github.longislandicetea.dshnative
 
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -141,6 +142,14 @@ private val scheme = darkColorScheme(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Set before the first frame, so a phone never flashes a landscape layout
+        // on its way to portrait. Tablets are left unspecified and rotate.
+        val smallestWidth = resources.configuration.smallestScreenWidthDp
+        requestedOrientation = if (locksToPortrait(smallestWidth)) {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
         val holder = AppStateHolder(lifecycleScope, applicationContext)
         setContent {
             MaterialTheme(colorScheme = scheme) {
@@ -149,6 +158,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+/**
+ * Whether this device should be held to portrait.
+ *
+ * A phone is a portrait surface: the transcript, the composer and the drawer are
+ * all laid out for one column, and rotating buys a reader nothing while costing
+ * half the vertical space the transcript needs. A tablet is the opposite -- the
+ * extra width is the point, and refusing to turn it is refusing the hardware.
+ *
+ * The boundary is Android's own: 600dp of smallest width is where the platform
+ * itself stops calling a screen a phone (sw600dp is the tablet resource
+ * qualifier, and `SCREENLAYOUT_SIZE_LARGE` begins there). Using smallest width
+ * rather than current width means a phone held sideways is still a phone, and a
+ * foldable keeps one answer however it is folded.
+ *
+ * Pure, so the boundary is pinned by a test instead of by remembering why 600.
+ */
+internal fun locksToPortrait(smallestWidthDp: Int): Boolean = smallestWidthDp < 600
 
 /** What a session in the drawer is doing, as far as this client can tell. */
 internal enum class SessionStatus { Running, NeedsYou, Done }
