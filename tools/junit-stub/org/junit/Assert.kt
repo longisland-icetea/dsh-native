@@ -69,6 +69,38 @@ object Assert {
     @JvmStatic
     fun assertEquals(expected: Any?, actual: Any?) = assertEquals(null, expected, actual)
 
+    /**
+     * Floating-point comparison, matching JUnit's `(expected, actual, delta)`.
+     * Kotlin's `Float` widens to this overload, which is why a test can write
+     * `assertEquals(1000f, sum, 0.5f)`.
+     */
+    @JvmStatic
+    fun assertEquals(expected: Double, actual: Double, delta: Double) {
+        if (kotlin.math.abs(expected - actual) > delta) {
+            throw AssertionError("values differ by more than $delta\n  expected: <$expected>\n  actual:   <$actual>")
+        }
+    }
+
+    @JvmStatic
+    fun assertEquals(message: String?, expected: Double, actual: Double, delta: Double) {
+        if (kotlin.math.abs(expected - actual) > delta) {
+            throw AssertionError((message ?: "values differ") + "\n  expected: <$expected>\n  actual:   <$actual>")
+        }
+    }
+
+    /**
+     * The `Float` form, because Kotlin does not widen `Float` to `Double` when
+     * picking an overload -- without this, `assertEquals(1f, x, 0.1f)` does not
+     * compile against the stub even though it does against real JUnit.
+     */
+    @JvmStatic
+    fun assertEquals(expected: Float, actual: Float, delta: Float) =
+        assertEquals(expected.toDouble(), actual.toDouble(), delta.toDouble())
+
+    @JvmStatic
+    fun assertEquals(message: String?, expected: Float, actual: Float, delta: Float) =
+        assertEquals(message, expected.toDouble(), actual.toDouble(), delta.toDouble())
+
     @JvmStatic
     fun assertSame(message: String?, expected: Any?, actual: Any?) {
         if (expected !== actual) {

@@ -86,6 +86,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
@@ -1275,7 +1276,7 @@ private fun TableBlock(table: MarkdownBlock.Table) {
     val columns = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
     if (columns == 0) return
 
-    val weights = remember(table) { columnWeights(table, columns) }
+    val paddingPx = with(LocalDensity.current) { TABLE_CELL_PADDING.toPx() }
 
     // The grid needs a *bounded* width or `weight` cannot resolve: inside
     // `horizontalScroll` the width constraint is infinite, and `Row` skips
@@ -1285,9 +1286,17 @@ private fun TableBlock(table: MarkdownBlock.Table) {
     // for a wide table.
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val viewport = maxWidth
-        // A floor so a table with many columns does not collapse into unreadable
-        // slivers, and a ceiling so a wide one does not scroll forever.
-        val gridWidth = maxOf(viewport, TABLE_CELL_FLOOR * columns)
+        val viewportPx = with(LocalDensity.current) { viewport.toPx() }
+        val maxColumnPx = with(LocalDensity.current) { TABLE_MAX_CELL_WIDTH.toPx() }
+
+        val layout = remember(table, viewportPx) {
+            equalColumnWidths(columns, viewportPx, paddingPx, maxColumnPx)
+        }
+        val widths = layout.first
+        val gridWidth = with(LocalDensity.current) { layout.second.toDp() }
+        val cellWidth = with(LocalDensity.current) {
+            Array(columns) { index -> widths.getOrElse(index) { 0f }.toDp() }
+        }
 
         Column(
             Modifier
@@ -1299,7 +1308,7 @@ private fun TableBlock(table: MarkdownBlock.Table) {
                 table.header.forEachIndexed { index, cell ->
                     TableCell(
                         text = cell,
-                        weight = weights.getOrElse(index) { 1f / columns },
+                        width = cellWidth[index],
                         header = true,
                         last = index == columns - 1,
                     )
@@ -1319,7 +1328,7 @@ private fun TableBlock(table: MarkdownBlock.Table) {
                     for (index in 0 until columns) {
                         TableCell(
                             text = row.getOrElse(index) { "" },
-                            weight = weights.getOrElse(index) { 1f / columns },
+                            width = cellWidth[index],
                             header = false,
                             last = index == columns - 1,
                         )
@@ -1333,75 +1342,85 @@ private fun TableBlock(table: MarkdownBlock.Table) {
     }
 }
 
-/** Narrowest a column may be laid out at before the grid starts scrolling. */
-private val TABLE_CELL_FLOOR = 72.dp
+/**
+ * Widest a column may grow to. A single column of prose would otherwise take the
+ * whole width and become an unreadable line length.
+ */
+private val TABLE_MAX_CELL_WIDTH = 320.dp
 
 /**
- * Relative width of each column, from the widest cell it has to hold.
+ * Column widths in pixels: equal shares of the viewport, always.
  *
- * Two steps, because either one alone produces a bad table. The raw weights come
- * from content length, capped per cell so one chatty column cannot dwarf the
- * rest. Normalising those alone is not enough: with three columns of 40/4/4
- * characters the long one takes 83% and the other two are unreadable. So the
- * normalised shares are then water-filled -- any share above the ceiling is
- * pinned there and the remainder is redistributed among the others -- which is
- * what actually guarantees the floor.
+ * `table-layout: fixed` with equal columns. A table is read down its columns, so
+ * equal widths let the eye find a column without re-measuring it on every row --
+ * and on a phone the whole grid then fits, which matters more than giving a short
+ * column less room. Cells wrap inside their share; a long token is allowed to
+ * overflow its own cell rather than be given a wider one, because widening one
+ * column is what pushed the grid past the viewport and left the screen empty.
  *
- * Pure and internal so the arithmetic can be asserted (`TableLayoutTest`): the
- * first attempt at proportional columns measured every column as zero and drew an
- * empty frame, and a device check alone would not have said which part was wrong.
+ * Returns the widths *and* the grid width, since the two have to agree: the grid
+ * is their sum plus the padding, and computing that separately is how it drifted
+ * from the viewport in the first place.
  */
-internal fun columnWeights(table: MarkdownBlock.Table, columns: Int): List<Float> {
-    if (columns <= 0) return emptyList()
-    val widest = (0 until columns).map { index ->
-        val header = table.header.getOrElse(index) { "" }
-        val body = table.rows.maxOfOrNull { it.getOrElse(index) { "" } } ?: ""
-        // `length` counts code points, not display width; it is a stand-in for
-        // "how much text is here", which is all the weighting needs.
-        maxOf(header.length, body.length).coerceIn(MIN_CELL_CHARS, MAX_CELL_CHARS)
-    }
-
-    // A single column fills the table, and more columns than the floor allows
-    // cannot all keep it.
-    if (columns == 1) return listOf(1f)
-    val floor = minOf(MIN_SHARE, 1f / columns)
-    val ceiling = maxOf(MAX_SHARE, floor)
-
-    var remaining = 1f
-    var open = widest.indices.toMutableList()
-    val share = FloatArray(columns)
-    while (open.isNotEmpty()) {
-        val weightTotal = open.sumOf { widest[it] }.toFloat()
-        val clamped = open.filter { remaining * widest[it] / weightTotal > ceiling }
-        if (clamped.isEmpty()) {
-            open.forEach { share[it] = remaining * widest[it] / weightTotal }
-            break
-        }
-        // Pin the greedy columns at the ceiling and re-spread what is left.
-        clamped.forEach {
-            share[it] = ceiling
-            remaining -= ceiling
-        }
-        open = open.filterNot { it in clamped }.toMutableList()
-    }
-    // Whatever the ceiling left unassigned goes to the widest remaining column,
-    // so the shares always sum to the whole width.
-    val leftover = 1f - share.sum()
-    if (leftover > 1e-4f) {
-        val target = (0 until columns).maxByOrNull { share[it] } ?: 0
-        share[target] += leftover
-    }
-    return share.map { if (it < floor && columns > 1) maxOf(it, floor) else it }
+internal fun equalColumnWidths(
+    columns: Int,
+    available: Float,
+    cellPadding: Float,
+    maxColumnWidth: Float,
+): Pair<List<Float>, Float> {
+    if (columns <= 0) return emptyList<Float>() to 0f
+    val viewport = maxOf(available, 1f)
+    val budget = maxOf(viewport - cellPadding * columns, 1f)
+    // The cap only bites when the columns are wide enough to be unreadable lines;
+    // it can never make the grid wider than the viewport.
+    val each = minOf(budget / columns, maxOf(maxColumnWidth, 1f))
+    val grid = each * columns + cellPadding * columns
+    return List(columns) { each } to minOf(grid, viewport)
 }
 
-/** Shortest a column is treated as, in characters, when weighting. */
-private const val MIN_CELL_CHARS = 4
-/** Longest, so one long cell cannot dwarf the column weighting. */
-private const val MAX_CELL_CHARS = 40
-/** Smallest share of the table a column keeps, so nothing is squeezed out. */
-private const val MIN_SHARE = 0.15f
-/** Largest share, so one column cannot flatten the others. */
-private const val MAX_SHARE = 0.7f
+/**
+ * The narrowest a column can be without breaking a word: its longest unbreakable
+ * token, measured in the font the table renders with.
+ *
+ * CJK text breaks between any two characters, so a run of Han characters is not
+ * one token; treating it as one would lock every Chinese column at the width of
+ * its longest phrase and force the table to scroll.
+ */
+internal fun minContentWidth(text: String, measure: (String) -> Float): Float {
+    if (text.isEmpty()) return 0f
+    var widest = 0f
+    var token = StringBuilder()
+    fun flush() {
+        if (token.isNotEmpty()) {
+            widest = maxOf(widest, measure(token.toString()))
+            token = StringBuilder()
+        }
+    }
+    text.forEach { ch ->
+        when {
+            ch.isWhitespace() -> flush()
+            isBreakableCjk(ch) -> {
+                flush()
+                widest = maxOf(widest, measure(ch.toString()))
+            }
+            else -> token.append(ch)
+        }
+    }
+    flush()
+    return widest
+}
+
+/** Whether a line may break on either side of this character. */
+internal fun isBreakableCjk(ch: Char): Boolean = when (Character.UnicodeBlock.of(ch)) {
+    Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS,
+    Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A,
+    Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION,
+    Character.UnicodeBlock.HIRAGANA,
+    Character.UnicodeBlock.KATAKANA,
+    Character.UnicodeBlock.HANGUL_SYLLABLES,
+    -> true
+    else -> false
+}
 
 /**
  * One grid cell: the text, its padding, and the rule on its trailing edge.
@@ -1410,8 +1429,8 @@ private const val MAX_SHARE = 0.7f
  * not to a composable of its own.
  */
 @Composable
-private fun RowScope.TableCell(text: String, weight: Float, header: Boolean, last: Boolean) {
-    Row(Modifier.weight(weight, fill = true).fillMaxHeight()) {
+private fun RowScope.TableCell(text: String, width: androidx.compose.ui.unit.Dp, header: Boolean, last: Boolean) {
+    Row(Modifier.width(width).fillMaxHeight()) {
         Text(
             text = SimpleMarkdown.inline(text, ACCENT, Color(0xFF8FD6FF)),
             color = if (header) ACCENT else Color(0xFFB9C1CE),
