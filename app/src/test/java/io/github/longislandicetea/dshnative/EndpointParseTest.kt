@@ -35,16 +35,26 @@ class EndpointParseTest {
 
     @Test
     fun `full-width punctuation parses`() {
-        // What a Chinese IME actually produces.
+        // What a Chinese IME produces for `.` and `:`.
         val endpoint = DshEndpoint.parse("192。168。255。5：3080")
         assertEquals("192.168.255.5", endpoint?.host)
         assertEquals(3080, endpoint?.port)
     }
 
     @Test
-    fun `full-width punctuation is normalised before use`() {
-        assertEquals("a.b:c/d-e", DshEndpoint.normalizePunctuation("a。b：c／d－e"))
+    fun `full-width punctuation folds to ascii`() {
+        assertEquals("192.168.1.20:3080", DshEndpoint.normalizePunctuation("192。168。1。20：3080"))
         assertEquals("192.168.1.20:3080", DshEndpoint.normalizePunctuation("192.168.1.20:3080"))
+    }
+
+    @Test
+    fun `a stray full-width mark is the reader's to fix`() {
+        // `；` folds to `;`, which is not a port separator, so the semicolon stays
+        // in the host and the address fails at DNS. Deliberately not compensated
+        // for: the fold handles what a keyboard emits, and guessing at anything
+        // else would paper over a typo the reader can see and correct.
+        val endpoint = DshEndpoint.parse("192.168.255.5；3080")
+        assertEquals("192.168.255.5;3080", endpoint?.host)
     }
 
     @Test
