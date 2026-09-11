@@ -19,6 +19,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import android.util.Log
@@ -881,29 +882,16 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      *
      * The waterfall's return value is the structured batch
      * `{answers:[{id, selected, custom?}]}`, keyed by the caller's question ids,
-     * so one call answers the whole batch rather than one question at a time.
+     * so one call answers the whole batch -- the reader works through the
+     * questions one at a time, but the Host is given all of the answers at once.
+     * The value is assembled by [QuestionFlow], which is where the rules live.
      */
-    fun answerQuestions(interaction: PendingInteraction, selected: Map<String, List<String>>, custom: Map<String, String>) {
+    fun answerQuestions(interaction: PendingInteraction, value: JsonObject) {
         val active = client ?: return
         val clientId = eventClientId ?: return
-        val batch = QuestionAnswer(
-            answers = interaction.questions.map { question ->
-                QuestionAnswerItem(
-                    id = question.id,
-                    selected = selected[question.id] ?: emptyList(),
-                    custom = custom[question.id],
-                )
-            },
-        )
         scope.launch(Dispatchers.IO) {
-            runCatching {
-                active.answerWaterfall(
-                    clientId,
-                    interaction.eventId,
-                    DshWire.json.encodeToJsonElement(QuestionAnswer.serializer(), batch),
-                )
-            }
-                .onSuccess { record("answered question batch (${batch.answers.size})") }
+            runCatching { active.answerWaterfall(clientId, interaction.eventId, value) }
+                .onSuccess { record("answered ${interaction.questions.size} question(s)") }
                 .onFailure { record("answer failed: ${it.message}") }
             _state.update { it.copy(pending = it.pending.filterNot { p -> p.eventId == interaction.eventId }) }
         }

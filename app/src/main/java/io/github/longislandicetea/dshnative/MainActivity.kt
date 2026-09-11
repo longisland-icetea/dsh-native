@@ -39,6 +39,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Send
@@ -70,6 +72,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -1449,87 +1452,177 @@ private fun PendingCard(interaction: PendingInteraction, holder: AppStateHolder)
 }
 
 /**
- * Render a user-questions batch.
+ * Render a user-questions batch, one question at a time.
  *
- * Single-select questions settle as soon as an option is chosen; a question
- * with no options (or a multi-select one) also offers a text field, because the
- * Host accepts free text alongside or instead of a selection and refusing to
- * send it would strand the agent.
+ * The order and the rules mirror the web client's card, because the same Host
+ * asks the same question in both and an answer the web client would not produce
+ * is not one the asker is prepared for:
+ *
+ * - one question on screen, with `1 / n` and arrows to move between them;
+ * - choosing an option on a single-select question answers it and moves on;
+ *   toggling one on a multi-select question keeps it open;
+ * - every question with options also offers a text field, and typing in it
+ *   answers the question in place of the option;
+ * - "Skip" answers the question with nothing, which is different from not
+ *   having answered it yet;
+ * - the primary button advances until the last question, then submits the whole
+ *   batch -- the Host wants all of the answers at once, in one waterfall value.
  */
 @Composable
 private fun QuestionBody(interaction: PendingInteraction, holder: AppStateHolder) {
-    val selected = remember(interaction.eventId) { mutableStateMapOf<String, List<String>>() }
-    val custom = remember(interaction.eventId) { mutableStateMapOf<String, String>() }
+    val questions = interaction.questions
+    var index by remember(interaction.eventId) { mutableStateOf(0) }
+    val drafts = remember(interaction.eventId) {
+        mutableStateListOf<QuestionDraft>().apply { addAll(QuestionFlow.drafts(questions)) }
+    }
+    var error by remember(interaction.eventId) { mutableStateOf<String?>(null) }
+    var busy by remember(interaction.eventId) { mutableStateOf(false) }
 
-    fun submit() = holder.answerQuestions(interaction, selected.toMap(), custom.toMap())
+    val question = questions.getOrNull(index) ?: return
+    val draft = drafts.getOrNull(index) ?: QuestionDraft()
+    val multiSelect = question.multiSelect == true
+    val last = index == questions.lastIndex
+
+    fun put(value: QuestionDraft) {
+        if (index in drafts.indices) drafts[index] = value
+        error = null
+    }
+
+    fun submit() {
+        val missing = QuestionFlow.firstIncomplete(drafts)
+        if (missing != null) {
+            index = missing
+            error = "Please answer this question, or skip it."
+            return
+        }
+        busy = true
+        holder.answerQuestions(interaction, QuestionFlow.answerValue(questions, drafts))
+    }
 
     Column {
-        interaction.questions.forEach { question ->
+        // One question at a time: the pager also shows how much of the batch is
+        // left, which a single scrolling card cannot.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (questions.size > 1) {
+                Text(
+                    text = "${index + 1} / ${questions.size}",
+                    color = MUTED,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.width(6.dp))
+            }
             question.header?.let {
                 Text(it.uppercase(), color = MUTED, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             }
-            Text(question.question, fontSize = 13.sp, modifier = Modifier.padding(top = 2.dp))
-            question.detail?.let {
-                Text(it.take(600), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-            }
-            val options = question.options
-            if (options.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                options.forEach { option ->
-                    val isSelected = selected[question.id]?.contains(option.label) == true
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                if (question.multiSelect == true) {
-                                    val current = selected[question.id].orEmpty()
-                                    selected[question.id] =
-                                        if (isSelected) current - option.label else current + option.label
-                                } else {
-                                    // Single select answers immediately: a second
-                                    // tap target would add a step for nothing.
-                                    selected[question.id] = listOf(option.label)
-                                    submit()
-                                }
-                            }
-                            .background(
-                                if (isSelected) Color(0xFF33405A) else Color(0xFF23262E),
-                                RoundedCornerShape(8.dp),
-                            )
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Text(option.label, fontSize = 13.sp)
-                        option.description?.let {
-                            Text(it, color = MUTED, fontSize = 11.sp)
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.weight(1f))
+            if (questions.size > 1) {
+                IconButton(
+                    onClick = { index -= 1; error = null },
+                    enabled = index > 0 && !busy,
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(Icons.Filled.KeyboardArrowLeft, contentDescription = "Previous question", tint = if (index > 0) ACCENT else MUTED, modifier = Modifier.size(18.dp))
                 }
-            }
-            if (options.isEmpty() || question.multiSelect == true) {
-                var draft by remember(question.id) { mutableStateOf("") }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextField(
-                        value = draft,
-                        onValueChange = {
-                            draft = it
-                            custom[question.id] = it
-                        },
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Answer", fontSize = 12.sp, color = MUTED) },
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                        ),
-                    )
+                IconButton(
+                    onClick = { index += 1; error = null },
+                    enabled = !last && !busy,
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(Icons.Filled.KeyboardArrowRight, contentDescription = "Next question", tint = if (!last) ACCENT else MUTED, modifier = Modifier.size(18.dp))
                 }
             }
         }
-        if (interaction.questions.size > 1 || interaction.questions.any { it.multiSelect == true || it.options.isEmpty() }) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { submit() }) { Text("Submit", fontSize = 13.sp) }
+        Text(question.question, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+        question.detail?.let {
+            Text(it.take(600), color = MUTED, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+
+        Spacer(Modifier.height(6.dp))
+        question.options.forEachIndexed { optionIndex, option ->
+            val isSelected = draft.selected.contains(option.label)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !busy) {
+                        val next = QuestionFlow.choose(draft, option.label, multiSelect)
+                        // A single-select answer is complete on its own, so it
+                        // moves on; a toggle is not, so it stays.
+                        if (!multiSelect && index < questions.lastIndex) {
+                            put(next)
+                            index += 1
+                            error = null
+                        } else {
+                            put(next)
+                        }
+                    }
+                    .background(
+                        if (isSelected) Color(0xFF33405A) else Color(0xFF23262E),
+                        RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text(
+                    text = if (multiSelect) (if (isSelected) "\u2611" else "\u2610") else "${optionIndex + 1}.",
+                    color = if (isSelected) ACCENT else MUTED,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.width(20.dp),
+                )
+                Column {
+                    Text(option.label, fontSize = 13.sp, fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
+                    option.description?.let { Text(it, color = MUTED, fontSize = 11.sp) }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+        }
+
+        // Every question takes a typed answer, options or not: the Host accepts
+        // free text alongside a selection and the web client offers the same
+        // field, so a reader with an answer nobody listed is never stuck.
+        var draftText by remember(interaction.eventId, index) { mutableStateOf(draft.custom) }
+        TextField(
+            value = draftText,
+            onValueChange = {
+                draftText = it
+                put(QuestionFlow.type(draft, it, multiSelect))
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text(if (question.options.isEmpty()) "Type your answer" else "Or type your own answer", fontSize = 12.sp, color = MUTED) },
+            maxLines = 4,
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color(0xFF23262E),
+                unfocusedContainerColor = Color(0xFF23262E),
+                focusedIndicatorColor = if (draftText.isNotEmpty()) ACCENT else Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+            ),
+        )
+
+        error?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, color = WARN, fontSize = 11.sp)
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { put(QuestionFlow.skip(draft)) }, enabled = !busy) {
+                Text("Skip this question", fontSize = 12.sp, color = MUTED)
+            }
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = { if (last) submit() else { index += 1; error = null } },
+                enabled = !busy && draft.answered(),
+            ) {
+                Text(
+                    text = when {
+                        busy -> "Sending…"
+                        last -> "Submit"
+                        else -> "Next question"
+                    },
+                    fontSize = 13.sp,
+                )
             }
         }
     }
