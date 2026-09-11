@@ -430,7 +430,18 @@ data class PromptContent(val type: String, val text: String)
 data class PromptRequest(
     val requestId: String,
     val sessionId: String,
-    val mode: String = "queue",
+    /**
+     * How a prompt sent while the agent is busy is delivered.
+     *
+     * `steer` folds the text into the running turn, so a correction reaches the
+     * agent while it is still working instead of waiting for the next turn. The
+     * Host keeps the window: a submission arriving after it closed becomes the
+     * next queue item, so steering is best-effort and never drops the text.
+     * `queue` is the Host's own default and what the desktop composer does for a
+     * plain Enter; this client steers, because a phone sending one short
+     * correction mid-turn is the case that mode exists for.
+     */
+    val mode: String = "steer",
     val content: List<PromptContent>,
 )
 
