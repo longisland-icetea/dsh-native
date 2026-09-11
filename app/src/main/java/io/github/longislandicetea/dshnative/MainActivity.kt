@@ -119,6 +119,10 @@ private val CODE_BG = Color(0xFF12141A)
 private val ACCENT = Color(0xFF6E9BF7)
 private val MUTED = Color(0xFF8A93A5)
 private val WARN = Color(0xFFE5A06B)
+/** Session states: a turn is running, the session wants an answer, or neither. */
+private val STATUS_RUNNING = Color(0xFF4C8DFF)
+private val STATUS_ATTENTION = Color(0xFFE5A06B)
+private val STATUS_DONE = Color(0xFF4CAF72)
 
 private val scheme = darkColorScheme(
     primary = ACCENT,
@@ -138,6 +142,35 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+/** What a session in the drawer is doing, as far as this client can tell. */
+internal enum class SessionStatus { Running, NeedsYou, Done }
+
+/**
+ * The state of one session row.
+ *
+ * `running` comes from the Host. A session that is not running but has an
+ * unanswered approval or question still wants the reader, and that is the state
+ * worth interrupting for -- it is the one that blocks an agent. Everything else has
+ * finished what it was asked to do.
+ */
+internal fun sessionStatus(running: Boolean, needsAnswer: Boolean): SessionStatus = when {
+    running -> SessionStatus.Running
+    needsAnswer -> SessionStatus.NeedsYou
+    else -> SessionStatus.Done
+}
+
+internal fun statusColor(status: SessionStatus): Color = when (status) {
+    SessionStatus.Running -> STATUS_RUNNING
+    SessionStatus.NeedsYou -> STATUS_ATTENTION
+    SessionStatus.Done -> STATUS_DONE
+}
+
+internal fun statusLabel(status: SessionStatus): String = when (status) {
+    SessionStatus.Running -> "running"
+    SessionStatus.NeedsYou -> "needs you"
+    SessionStatus.Done -> "done"
 }
 
 /** Which control the composer shows, as the web client decides it. */
@@ -888,6 +921,7 @@ private fun SessionDrawer(
                             session = session,
                             active = state.conversation?.sessionId == session.sessionId,
                             archived = state.archived.contains(session.sessionId),
+                            needsAnswer = state.pending.any { it.sessionId == session.sessionId },
                             onPick = { onPick(session) },
                             onArchive = { onArchive(session.sessionId) },
                         )
@@ -1024,7 +1058,14 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
             .collect {
                 if (!atBottom) return@collect
                 val lastIndex = total - 1 + if (liveText.isNotEmpty()) 1 else 0
-                if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+                if (lastIndex < 0) return@collect
+                // Scroll to the *end* of the row, not to its top: `scrollToItem`
+                // puts the item at the top of the viewport, which for a tall
+                // transcript row means the reader lands on the beginning of the
+                // newest message while everything below it is off-screen -- a
+                // follow that looked like it kept jumping backwards.
+                val reach = listState.layoutInfo.viewportEndOffset + listState.layoutInfo.beforeContentPadding
+                listState.animateScrollToItem(lastIndex, reach)
             }
     }
 
@@ -1271,6 +1312,8 @@ private fun SessionRow(
     session: SessionSummary,
     active: Boolean,
     archived: Boolean,
+    /** Whether this session has an approval or question waiting to be answered. */
+    needsAnswer: Boolean,
     onPick: () -> Unit,
     onArchive: () -> Unit,
 ) {
@@ -1290,10 +1333,18 @@ private fun SessionRow(
             color = if (archived) MUTED else Color(0xFFDDE2EC),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (session.running) {
-                Text("running", color = ACCENT, fontSize = 10.sp)
-                Spacer(Modifier.width(8.dp))
-            }
+            // One dot per row, coloured by state: blue while a turn runs, orange
+            // when the session is waiting on an answer, green once it is done. The
+            // label carries the meaning for anyone who cannot rely on the colour.
+            val status = sessionStatus(session.running, needsAnswer)
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(statusColor(status), CircleShape),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(statusLabel(status), color = statusColor(status), fontSize = 10.sp)
+            Spacer(Modifier.width(8.dp))
             if (session.origin == "subagent") {
                 Text("subagent", color = MUTED, fontSize = 10.sp)
                 Spacer(Modifier.width(8.dp))
@@ -1304,13 +1355,27 @@ private fun SessionRow(
         AlertDialog(
             onDismissRequest = { menu = false },
             title = { Text(session.title, fontSize = 14.sp) },
-            text = null,
             confirmButton = {
-                TextButton(onClick = { onArchive(); menu = false }) {
-                    Text(if (archived) "Unarchive" else "Archive")
+                TextButton(enabled = !archived, onClick = { onArchive(); menu = false }) {
+                    Text("Archive")
                 }
             },
             dismissButton = { TextButton(onClick = { menu = false }) { Text("Cancel") } },
+            // Archiving is one-way in this harness: there is no unarchive API, so
+            // offering "Unarchive" here (as an earlier version did) was a button
+            // that did nothing. Say where it can be undone instead.
+            text = if (archived) {
+                {
+                    Text(
+                        "This session is archived. Archiving is one-way in DSH, so it " +
+                            "cannot be restored from here.",
+                        fontSize = 12.sp,
+                        color = MUTED,
+                    )
+                }
+            } else {
+                null
+            },
         )
     }
 }

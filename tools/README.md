@@ -103,3 +103,16 @@ build:
 
 Gradle merges the keep rules that prevent the first from the libraries' AARs;
 invoking R8 directly does not, so they live in `app/proguard-rules.pro`.
+
+## Testing against a live harness
+
+Some of this app's behaviour can only be checked against a running DSH, and that
+harness holds real work. Two rules, both learned the hard way:
+
+- **Create a session to test with.** Archiving is one-way in DSH and there is no
+  unarchive API, so a state-changing test run against a session the user is working
+  in destroys something that cannot be restored from the app. A throwaway session
+  costs nothing and can be archived afterwards.
+- **Read the corpus, do not write to it.** Auditing event shapes, table parsing and
+  notice classification is read-only and safe; it also caught more than any
+  hand-written case did.

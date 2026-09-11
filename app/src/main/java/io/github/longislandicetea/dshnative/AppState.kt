@@ -14,7 +14,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import android.util.Log
@@ -712,6 +714,30 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                             _state.update { current ->
                                 val next = current.workspaces.filterNot { it.workspaceId == updated.workspaceId } + updated
                                 current.copy(workspaces = next.sortedBy { it.createdAt ?: "" })
+                            }
+                        }
+                        // The Host pushes the whole archive set whenever it changes,
+                        // including for a change made on another client. Without this
+                        // branch the drawer kept showing a session archived on the
+                        // desktop, and vice versa, until a manual refresh.
+                        "archived" -> {
+                            val ids = (obj["archivedSessionIds"] as? JsonArray)
+                                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                            if (ids != null) {
+                                record("archived set: ${ids.size}")
+                                _state.update {
+                                    it.copy(archived = ids.toSet(), archivedKnown = true)
+                                }
+                            }
+                        }
+                        "removed" -> {
+                            val workspaceId = obj["workspaceId"]?.jsonPrimitive?.contentOrNull
+                            if (workspaceId != null) {
+                                _state.update { current ->
+                                    current.copy(
+                                        workspaces = current.workspaces.filterNot { it.workspaceId == workspaceId },
+                                    )
+                                }
                             }
                         }
                     }
