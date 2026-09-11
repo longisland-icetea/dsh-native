@@ -853,3 +853,26 @@ Three things a stranger would have hit, found by auditing for publication:
 
 Also replaces a real home directory in a test assertion with an example path, and
 records the scrub in the fixture's doc comment.
+
+## Replace the vendor's mark with a monogram of our own
+
+The icon had been the harness's own favicon, traced from its `favicon.svg`. That is
+the vendor's brand mark, unlicensed for this use, and it made an unofficial client
+look official -- the one impression a third-party client must not give. It is gone,
+along with `tools/make-icons.py` and its SVG flattening, which existed only to
+rasterise that file. Every byte under `mipmap-*` is now drawn here.
+
+The first replacement was a rounded phone outline with a terminal prompt inside,
+which was worse than what it replaced: three ideas (frame, notch, glyph) in a space
+that fits one, illegible at 48px. The mark is now simply the letters **DSH**, which
+survive the size because the letters are the shape. Two runs of the ASCII preview
+settled it -- column ink profiles showing three separate clusters at 48px -- where
+an image viewer was not available to judge by eye.
+
+`tools/make-icon.py` sizes the letters to a fraction of the canvas width rather than
+to a point size, because a nominal size covers a different fraction in every face.
+The adaptive foreground is sized so the *text* stops at the 72dp safe-zone boundary;
+sizing the layer by its height instead would let a wide monogram run past it, and the
+square mask simulation confirmed nothing is clipped. `--export` writes the README's
+previews from the same code that writes the icons, so the documented mark cannot
+drift from the shipped one.

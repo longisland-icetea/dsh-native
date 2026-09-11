@@ -74,10 +74,14 @@ The resulting table lives in `docs/event-coverage.md`.
 
 ## Icon
 
-`python3 tools/make-icon.py` draws the launcher icons: a rounded phone outline with
-a terminal prompt inside, composed from primitives so nothing is traced from an SVG
-and no vendor's mark is involved. `--preview` prints both shapes as ASCII, which is
-how they were checked here — this VM has no image viewer.
+`python3 tools/make-icon.py` draws the launcher icons: the letters **DSH** as a
+monogram, composed from primitives so nothing is traced from an SVG and no vendor's
+mark is involved. It sizes the letters to a fraction of the canvas width rather than
+to a point size, and keeps them inside an adaptive icon's 72dp safe zone.
+`--preview` prints both shapes as ASCII (dark meaning ink) and `--export` writes the
+README's preview images from the same code — how the mark was checked here, since
+this VM has no image viewer. The ASCII preview is what rejected the phone-outline
+mark that preceded it.
 
 ## Editing hazard
 

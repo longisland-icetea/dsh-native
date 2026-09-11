@@ -99,15 +99,29 @@ APKs; tagging `v*` publishes the signed release.
 
 ## Icon
 
-A rounded phone outline holding a terminal prompt: a native client for a
-command-driven harness, which is what this app is. It is drawn from primitives by
-`tools/make-icon.py` and committed under `app/src/main/res/mipmap-*`, so it is
-covered by this project's MIT licence like the rest of the code — no vendor's brand
-mark is involved.
+The letters **DSH**, set as a monogram: white ground, near-black letters, nothing
+else. An earlier attempt drew a rounded phone outline with a terminal prompt inside
+it — three ideas (frame, notch, glyph) in a space that fits one — and at 48px it read
+as a smudge. A monogram survives the size because the letters *are* the shape.
 
-Regenerate with `python3 tools/make-icon.py`; `--preview` prints both shapes (the
-square legacy icon and the adaptive icon through a circular mask) as ASCII, which is
-how they were checked without an image viewer.
+| legacy | adaptive, circular mask | adaptive, rounded-square mask |
+|---|---|---|
+| ![legacy icon](docs/images/icon-legacy.png) | ![circular icon](docs/images/icon-circle.png) | ![rounded icon](docs/images/icon-squircle.png) |
+
+Drawn from primitives by `tools/make-icon.py` — no SVG, no downloaded asset, no
+vendor artwork — and committed under `app/src/main/res/mipmap-*`, so it is covered by
+this project's MIT licence along with the rest of the code.
+
+It is deliberately *not* DeepSeek's logo, wordmark or mascot, and it uses none of
+their artwork: a third-party client wearing the official mark invites exactly the
+confusion about who made it that this project wants to avoid. "DSH" here is an
+abbreviation of the API it speaks, not a claim to the brand. If the vendor objects to
+the monogram anyway, [open an issue](../../issues) and it will be replaced.
+
+Regenerate `app/src/main/res/mipmap-*` with `python3 tools/make-icon.py`, or these
+previews with `python3 tools/make-icon.py --export`. `--preview` prints both shapes as
+ASCII (dark meaning ink), which is how the mark was checked without an image viewer —
+and how the rejected outline was caught.
 
 ## Layout
 
@@ -141,5 +155,6 @@ Four things about this harness are easy to get wrong, and each cost a bug here:
 
 ## License
 
-[MIT](LICENSE). The DeepSeek Harness mark in the launcher icon is not covered by
-it — see [Icon](#icon).
+[MIT](LICENSE) covers everything in this repository, including the launcher icon,
+which is drawn here rather than taken from anyone. It is an unofficial client: not
+affiliated with, endorsed by, or supported by DeepSeek. See [Icon](#icon).

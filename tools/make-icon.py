@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Generate the launcher icons from a mark drawn here, not from anyone's logo.
+"""Generate the launcher icons: the letters DSH, set as a monogram.
 
 Origin: written for this repository.
 
-The mark is a rounded phone outline holding a terminal prompt (`>` and `_`). That
-is what this app is: a native client for a command-driven harness. It is
-deliberately not the harness vendor's logo -- shipping someone's brand mark in your
-own app invites confusion about who made it -- so it is composed from primitives
-here and the project's MIT licence covers it like the rest of the code.
+Three letters are the whole mark. An earlier attempt drew a phone outline with a
+terminal prompt inside; at 48px it read as a smudge, because it packed three ideas
+(a frame, a notch, a glyph) into a space that fits one. A monogram survives the size
+because there is nothing to resolve: the letters are their own shape.
 
-Shapes are drawn as filled polygons rather than strokes, because the shapes are the
-same whether they end up in a PNG or in a preview: `stroke` in Pillow has no cap or
-join control, which shows at 48px.
+The face is DejaVu Sans Bold, the boldest sans available here, and the letters are
+capped to the canvas width rather than a nominal point size so the monogram fills
+its box at every density. Deliberately not the harness vendor's logo: shipping
+someone else's brand mark in your own app invites confusion about who made it.
 
 Outputs, per density:
   legacy square icon      ic_launcher.png
@@ -28,7 +28,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 RES = ROOT / "app/src/main/res"
@@ -44,92 +44,64 @@ DENSITIES = {
     "xxxhdpi": 4.0,
 }
 LEGACY_DP = 48
+# How much of the canvas width the letters span. Three letters have a ~3:1 aspect,
+# so a horizontal monogram always leaves vertical room; 0.86 of the width puts the
+# letters as large as they can be while still reading as a mark rather than as a
+# word running edge to edge.
+TEXT_SPAN = 0.86
 # An adaptive icon is a 108dp canvas, but only the middle 72dp is guaranteed
 # visible; the mark is drawn at 62dp so no launcher mask can clip it.
 ADAPTIVE_DP = 108
-MARK_DP = 62
+# The guaranteed-visible area of an adaptive icon is the middle 72dp. The letters
+# span TEXT_SPAN of the mark, so a mark of 72/TEXT_SPAN dp makes the *text* stop
+# exactly at that boundary -- for a wide monogram, sizing the mark for its height
+# would let the letters run past it.
+SAFE_DP = 72
+MARK_DP = SAFE_DP / TEXT_SPAN
 
 SUPERSAMPLE = 8
 
-# The mark is defined on a 100x100 grid and scaled to whatever size is asked for,
-# so one set of numbers drives every density.
-GRID = 100.0
-PHONE = (27.0, 10.0, 73.0, 90.0)   # left, top, right, bottom
-PHONE_RADIUS = 12.0
-PHONE_STROKE = 6.5
-NOTCH = (44.0, 16.5, 56.0, 19.5)
-PROMPT_STROKE = 7.5
-# The prompt is the app's silhouette: a terminal chevron, bold enough to read at
-# 48px where a thinner stroke turns to grey.
-CHEVRON = ((32.0, 38.5), (47.0, 50.0), (32.0, 61.5))   # apex, tip, base
-UNDERSCORE = (55.0, 58.0, 66.5, 64.5)                  # left, top, right, bottom
+FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/system/fonts/Roboto-Bold.ttf",
+)
 
 
-def rounded_rect_outline(box, radius, width, steps: int = 24) -> list[tuple[float, float]]:
-    """A rounded-rectangle ring as one closed polygon (outer edge, inner edge)."""
-    left, top, right, bottom = box
-    inner = (left + width, top + width, right - width, bottom - width)
-    inner_radius = max(radius - width, 0.0)
-
-    def corners(b, r):
-        points = []
-        for cx, cy, start in (
-            (b[2] - r, b[1] + r, -90.0),
-            (b[2] - r, b[3] - r, 0.0),
-            (b[0] + r, b[3] - r, 90.0),
-            (b[0] + r, b[1] + r, 180.0),
-        ):
-            for step in range(steps + 1):
-                angle = (start + 90.0 * step / steps) * 3.141592653589793 / 180.0
-                import math
-
-                points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
-        return points
-
-    return corners(box, radius) + corners(inner, inner_radius)[::-1]
-
-
-def chevron_outline(apex, tip, base, width: float) -> list[tuple[float, float]]:
-    """A `>` as a closed seven-point outline: outer edge down, inner edge back."""
-    import math
-
-    def offset(a, b, amount):
-        dx, dy = b[0] - a[0], b[1] - a[1]
-        length = math.hypot(dx, dy) or 1.0
-        # left normal
-        return (a[0] - dy / length * amount, a[1] + dx / length * amount)
-
-    half = width / 2.0
-    return [
-        offset(apex, tip, half),
-        offset(tip, base, half),
-        offset(base, tip, half),
-        offset(tip, apex, half),
-        offset(tip, apex, -half),
-        offset(base, tip, -half),
-        offset(tip, base, -half),
-        offset(apex, tip, -half),
-    ]
-
-
-def scale(points, size: float):
-    factor = size / GRID
-    return [(x * factor, y * factor) for x, y in points]
+def load_font(size: int):
+    """The boldest available sans, at `size`."""
+    for path in FONT_CANDIDATES:
+        if Path(path).exists():
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+    raise SystemExit(
+        "no usable font found; add a path to FONT_CANDIDATES "
+        f"(tried: {', '.join(FONT_CANDIDATES)})"
+    )
 
 
 def render_mark(size: int, colour=MARK) -> Image.Image:
-    """The mark alone on transparent, at `size` pixels square."""
-    big = size * SUPERSAMPLE
-    layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+    """The monogram alone on transparent, filling `TEXT_SPAN` of `size` pixels."""
+    import math
 
-    draw.polygon(scale(rounded_rect_outline(PHONE, PHONE_RADIUS, PHONE_STROKE), big), fill=colour)
-    draw.polygon(scale([(NOTCH[0], NOTCH[1]), (NOTCH[2], NOTCH[1]), (NOTCH[2], NOTCH[3]), (NOTCH[0], NOTCH[3])], big), fill=colour)
-    draw.polygon(scale(chevron_outline(*CHEVRON, PROMPT_STROKE), big), fill=colour)
-    draw.polygon(
-        scale([(UNDERSCORE[0], UNDERSCORE[1]), (UNDERSCORE[2], UNDERSCORE[1]),
-               (UNDERSCORE[2], UNDERSCORE[3]), (UNDERSCORE[0], UNDERSCORE[3])], big),
-        fill=colour,
+    big = size * SUPERSAMPLE
+    # Ask for a large point size and then scale the drawn result to the target
+    # width: a nominal point size means different coverage in different faces, which
+    # is exactly what the icon must not depend on.
+    probe = load_font(big)
+    left, top, right, bottom = probe.getbbox("DSH")
+    drawn_w, drawn_h = right - left, bottom - top
+    target_w = big * TEXT_SPAN
+    scale_factor = target_w / drawn_w
+    font = load_font(max(1, round(big * scale_factor)))
+
+    a, b, c, d = font.getbbox("DSH")
+    text_w, text_h = c - a, d - b
+    layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text(
+        ((big - text_w) / 2 - a, (big - text_h) / 2 - b), "DSH", font=font, fill=colour,
     )
     return layer.resize((size, size), Image.LANCZOS)
 
@@ -137,7 +109,9 @@ def render_mark(size: int, colour=MARK) -> Image.Image:
 def legacy_icon(px: int) -> Image.Image:
     """The legacy icon: the mark inset on the background."""
     icon = Image.new("RGBA", (px, px), BACKGROUND)
-    inset = round(px * 0.16)
+    # The legacy icon has no mask, so the margin only has to look deliberate: the
+    # letters span TEXT_SPAN of the canvas whether or not a mask is applied.
+    inset = round(px * (1 - TEXT_SPAN) / 2)
     icon.alpha_composite(render_mark(px - 2 * inset), (inset, inset))
     return icon
 
@@ -163,7 +137,43 @@ def ascii_preview(path: Path, cols: int = 56) -> str:
     return "\n".join(lines)
 
 
+def masked_icon(px: int, shape: str) -> Image.Image:
+    """The composed adaptive icon as a launcher would draw it."""
+    foreground, background = adaptive_layers(px)
+    icon = Image.alpha_composite(background, foreground)
+    # A launcher insets the 108dp canvas before applying its mask, so the visible
+    # disc is smaller than the layer; matching that is what makes this a faithful
+    # preview rather than a flattering one.
+    inset = round(px * 0.0833)
+    mask = Image.new("L", (px, px), 0)
+    draw = ImageDraw.Draw(mask)
+    box = (inset, inset, px - inset - 1, px - inset - 1)
+    if shape == "circle":
+        draw.ellipse(box, fill=255)
+    elif shape == "squircle":
+        draw.rounded_rectangle(box, radius=round(px * 0.22), fill=255)
+    icon.putalpha(mask)
+    return icon
+
+
+def export_previews() -> None:
+    """Write `docs/images/icon-*.png`: reproducible previews for the README.
+
+    Generated from the same code that draws the real icons, so the documented mark
+    cannot drift from the shipped one.
+    """
+    out = ROOT / "docs/images"
+    out.mkdir(parents=True, exist_ok=True)
+    for shape in ("circle", "squircle"):
+        masked_icon(384, shape).save(out / f"icon-{shape}.png")
+    legacy_icon(384).save(out / "icon-legacy.png")
+    print("\n".join(f"docs/images/icon-{name}.png" for name in ("circle", "squircle", "legacy")))
+
+
 def main() -> None:
+    if "--export" in sys.argv:
+        export_previews()
+        return
     if "--preview" in sys.argv:
         # Both shapes a launcher may draw: the square legacy icon, and the adaptive
         # foreground seen through a circular mask (the tightest common one).
@@ -196,14 +206,13 @@ def main() -> None:
         background.save(folder / "ic_launcher_background.png")
         # The monochrome layer is the same shape in white: a themed launcher takes
         # its alpha channel and tints it itself.
-        render_mark(round(adaptive * MARK_DP / ADAPTIVE_DP), colour=(0xFF, 0xFF, 0xFF, 0xFF)).save(
-            folder / "ic_launcher_monochrome_tmp.png"
-        )
-        tmp = folder / "ic_launcher_monochrome_tmp.png"
+        mark_px = round(adaptive * MARK_DP / ADAPTIVE_DP)
         layer = Image.new("RGBA", (adaptive, adaptive), (0, 0, 0, 0))
-        layer.alpha_composite(Image.open(tmp), ((adaptive - Image.open(tmp).width) // 2,) * 2)
+        layer.alpha_composite(
+            render_mark(mark_px, colour=(0xFF, 0xFF, 0xFF, 0xFF)),
+            ((adaptive - mark_px) // 2, (adaptive - mark_px) // 2),
+        )
         layer.save(folder / "ic_launcher_monochrome.png")
-        tmp.unlink()
         written.append(f"{folder.name}: {legacy}px, {adaptive}px")
 
     print("\n".join(written))
