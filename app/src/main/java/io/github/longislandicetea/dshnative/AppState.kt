@@ -391,6 +391,13 @@ data class AppState(
      * worse than showing a loading line for a second.
      */
     val archivedKnown: Boolean = false,
+    /**
+     * Set when the workspace stream has stopped without ever delivering a baseline.
+     *
+     * A slow stream is not a failed one, so the drawer waits for the baseline rather
+     * than for a timer; this is what releases it if the stream is genuinely gone.
+     */
+    val workspaceFailed: Boolean = false,
     /** Routable models, loaded when the picker first opens. */
     val catalog: ModelCatalog? = null,
     /** Provider/model/effort currently in force for the open conversation. */
@@ -667,10 +674,15 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             active.workspaces()
                 .retryWhen { cause, _ ->
                     record("workspaces retry: ${cause.message}")
+                    // A retry is not a failure: the archive set may still arrive, and
+                    // the drawer will keep waiting for it.
                     delay(2_000)
                     true
                 }
-                .catch { record("workspaces stopped: ${it.message}") }
+                .catch { error ->
+                    record("workspaces stopped: ${error.message}")
+                    _state.update { it.copy(workspaceFailed = true) }
+                }
                 .collect { frame ->
                     val value = (frame as? MuxFrame.Item)?.value ?: return@collect
                     val obj = value as? kotlinx.serialization.json.JsonObject ?: return@collect
@@ -687,6 +699,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                                     workspaces = baseline.items,
                                     archived = baseline.archivedSessionIds.toSet(),
                                     archivedKnown = true,
+                                    workspaceFailed = false,
                                 )
                             }
                         }

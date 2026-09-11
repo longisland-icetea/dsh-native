@@ -663,6 +663,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                     EmptyState(
                         connected = state.connected,
                         sessionCount = state.visibleSessions.size,
+                        loading = !state.archivedKnown && !state.workspaceFailed,
                         onOpenDrawer = { scope.launch { drawerState.open() } },
                     )
                 } else {
@@ -718,14 +719,29 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
 }
 
 @Composable
-private fun EmptyState(connected: Boolean, sessionCount: Int, onOpenDrawer: () -> Unit) {
+private fun EmptyState(
+    connected: Boolean,
+    sessionCount: Int,
+    /**
+     * True while the archive set is still on its way.
+     *
+     * The count is not knowable before then -- it reads 34 and then 7 -- so the
+     * screen says it is loading instead of showing a number it will contradict.
+     */
+    loading: Boolean,
+    onOpenDrawer: () -> Unit,
+) {
     Column(
         Modifier.fillMaxSize().padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = if (connected) "$sessionCount sessions" else "Not connected",
+            text = when {
+                !connected -> "Not connected"
+                loading -> "Loading sessions…"
+                else -> "$sessionCount sessions"
+            },
             color = MUTED,
             fontSize = 14.sp,
         )
@@ -749,16 +765,18 @@ private fun SessionDrawer(
     onArchive: (String) -> Unit,
     onNewSession: (String?) -> Unit,
 ) {
-    // The list waits for the archive set so the first frame cannot show rows that
-    // are about to disappear, but only briefly: if that call is slow or failing,
-    // showing every session is better than a drawer that never finishes loading.
-    var gaveUpWaiting by remember(state.endpoint) { mutableStateOf(false) }
-    LaunchedEffect(state.archivedKnown) {
-        if (state.archivedKnown) return@LaunchedEffect
-        delay(3_000)
-        gaveUpWaiting = true
+    // The list waits for the archive set so no frame can show rows that are about
+    // to disappear. The wait is released by the stream ending, not by a stopwatch:
+    // the workspace call takes a second or two on a cold start, and a two-second
+    // timer is what let 34 sessions appear before dropping to 7. The 10s timer is
+    // only a last resort for a stream that is neither delivering nor ending.
+    var waitedTooLong by remember(state.endpoint) { mutableStateOf(false) }
+    LaunchedEffect(state.archivedKnown, state.workspaceFailed) {
+        if (state.archivedKnown || state.workspaceFailed) return@LaunchedEffect
+        delay(10_000)
+        waitedTooLong = true
     }
-    val waiting = !state.archivedKnown && !gaveUpWaiting
+    val waiting = !state.archivedKnown && !state.workspaceFailed && !waitedTooLong
 
     Column(Modifier.fillMaxSize().background(PANEL)) {
         Row(
@@ -773,7 +791,7 @@ private fun SessionDrawer(
                     text = when {
                         !state.connected -> "offline"
                         state.sessionsError != null -> "list failed"
-                        !state.archivedKnown && !gaveUpWaiting -> "loading…"
+                        !state.archivedKnown -> "loading…"
                         // Counts what the list shows: subagent sessions are
                         // children of a parent row, and archived ones are hidden
                         // by default.
