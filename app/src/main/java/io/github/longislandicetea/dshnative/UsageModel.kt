@@ -194,7 +194,11 @@ internal fun usageRowsFor(events: List<JsonObject>): List<Pair<Int, TranscriptIt
         val turn = ((event["data"] as? JsonObject)?.get("turn") as? JsonPrimitive)?.intOrNull
             ?: return@forEachIndexed
         if (!emitted.add(turn)) return@forEachIndexed
-        perTurn[turn]?.let { placed += index to TranscriptItem.Usage("usage:$turn", it, turn) }
+        // The key carries the sequence the row sits at -- the turn's closing
+        // event -- so ordering and paging place it exactly where it belongs
+        // instead of at the end of the transcript.
+        val seq = (event["seq"] as? JsonPrimitive)?.longOrNull ?: 0L
+        perTurn[turn]?.let { placed += index to TranscriptItem.Usage("usage:$turn:$seq", it, turn) }
     }
     return placed
 }

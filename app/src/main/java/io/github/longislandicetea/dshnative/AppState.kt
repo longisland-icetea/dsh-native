@@ -589,6 +589,19 @@ private class SessionViewStore(context: android.content.Context) {
     fun saveUnread(value: Set<String>) = prefs.edit().putStringSet("unread", value).apply()
 }
 
+/**
+ * The seq a row key carries, or null when it carries none.
+ *
+ * Every key ends with the seq: `seq-42` for an event with no turn, `turn:3:42`
+ * and `usage:3:42` for one that has a turn. Reading only the `seq-` form made
+ * every turn-keyed row sort to the end of the transcript, which stacked the
+ * reader's own messages at the top and buried the replies -- a reordering that
+ * looked like messages had been swallowed. Pure, so the format is pinned by a
+ * test rather than by remembering.
+ */
+internal fun seqOfKey(key: String): Long? =
+    key.substringAfterLast(':').removePrefix("seq-").toLongOrNull()
+
 class AppStateHolder(private val scope: CoroutineScope, context: android.content.Context? = null) {
     private val viewStore = context?.let(::SessionViewStore)
     private val _state = MutableStateFlow(
@@ -1486,7 +1499,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // both facts, which a renderer reading keys at draw time did not.
             val closed = if (event.type == "turn/end" && turn != null) {
                 pendingTurnUsage[turn]?.let { used ->
-                    TranscriptItem.Usage(key = "usage:$turn", usage = used, turn = turn)
+                    TranscriptItem.Usage(key = "usage:$turn:${event.seq}", usage = used, turn = turn)
                 }
             } else {
                 null
@@ -1515,8 +1528,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         FollowFrame.Unknown -> conversation
     }
 
-    private fun seqOf(item: TranscriptItem): Long =
-        item.key.removePrefix("seq-").toLongOrNull() ?: Long.MAX_VALUE
+    /** A row that carries no seq sorts last rather than throwing. */
+    private fun seqOf(item: TranscriptItem): Long = seqOfKey(item.key) ?: Long.MAX_VALUE
 
     /**
      * Map one durable event to a transcript row, or to null when the event is
@@ -1542,114 +1555,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * Pure and reachable from tests: the replayed shape of a history is worth
      * pinning without a Host.
      */
-    internal fun usageAwareItems(
-        records: List<SessionEvent>,
-        workspaceRoot: String? = null,
-    ): List<TranscriptItem> {
-        // The decision -- how much each turn cost and where the row goes -- is a
-        // pure function over the raw wire objects (see `usageRowsFor`), so it can
-        // be tested without a Host. This method only maps the surrounding rows.
-        val wire = records.map { record ->
-            buildJsonObject {
-                put("seq", JsonPrimitive(record.seq))
-                put("type", JsonPrimitive(record.type))
-                put("data", record.data)
-            }
-        }
-        val usageAfter = usageRowsFor(wire).groupBy({ it.first }, { it.second })
-        val out = ArrayList<TranscriptItem>(records.size + 4)
-        records.forEachIndexed { index, record ->
-            toItem(record, workspaceRoot)?.let(out::add)
-            usageAfter[index]?.forEach(out::add)
-        }
-        return out
-    }
 
-    internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
-        // `turn:<turn>:<seq>`: the turn is part of the key because the usage row
-        // is placed under the last row of its turn, and the renderer draws a
-        // stream of rows with no turn model of its own. A key of `seq-<n>` left
-        // that lookup with nothing to read.
-        val turn = (event.data as? JsonObject)?.get("turn")?.jsonPrimitive?.intOrNull
-        val key = if (turn == null) "seq-${event.seq}" else "turn:$turn:${event.seq}"
-        val text = event.text
-        return when (event.type) {
-            "user/message" -> when {
-                // A `user/message` whose source is not the user is the harness or
-                // another agent talking; only `kind == "user"` is a person typing.
-                // The distinction is the source kind and not the plugin field,
-                // because a relayed subagent message carries no plugin name.
-                EventPayload.isHiddenSource(event) -> null
-                EventPayload.isNotice(event) -> {
-                    val kind = EventPayload.sourceKind(event)
-                    val plugin = EventPayload.noticePlugin(event)
-                    TranscriptItem.Notice(
-                        key = key,
-                        label = noticeLabel(plugin, kind),
-                        plugin = plugin,
-                        sender = EventPayload.senderSessionId(event),
-                        body = EventPayload.noticeSummary(event) ?: text,
-                    )
-                }
-                text != null -> TranscriptItem.User(key, text)
-                else -> null
-            }
-            // An assistant message may carry only tool calls and no prose, which
-            // is a normal step rather than a renderable reply.
-            // A message with no text block carries only reasoning or tool calls,
-            // which are steps rather than a reply. Rendering nothing is correct;
-            // falling through printed the literal event name.
-            "assistant/message" -> text?.let { TranscriptItem.Assistant(key, it, streaming = false) }
-            // A turn that failed says so; a clean one is implied by the next
-            // message and a row per turn would just be noise.
-            "turn/end" -> EventPayload.turnOutcome(event)?.let { TranscriptItem.Note(key, it) }
-            "todo/write" -> EventPayload.todoList(event)?.let { TranscriptItem.Todo(key, it) }
-            "deliverables/presented" -> EventPayload.deliveredFiles(event)?.let {
-                TranscriptItem.Deliverables(key, it, workspaceRoot)
-            }
-            // Model switches and session settings are facts about the session
-            // rather than turns: one compact line each, no card.
-            "model/selection" -> EventPayload.modelChoice(event)?.let { choice ->
-                val effort = choice.effort?.let { " · $it" } ?: ""
-                TranscriptItem.Note(key, "model: ${choice.provider}/${choice.model}$effort")
-            }
-            "permission/preset", "sandbox/mode", "approval/policy",
-            "compaction/start", "compaction/end",
-            -> EventPayload.settingChange(event)?.let { (name, value) ->
-                TranscriptItem.Note(key, "$name: $value")
-            }
-            // Rendering every step boundary and inbox splice buries the
-            // conversation: one sampled turn produced hundreds of such rows
-            // against 41 assistant messages.
-            "turn/start", "step/start", "step/end", "agent/inbox/spliced",
-            "request/header", "request/context",
-            // Raw stream chunks: the message they assemble into is rendered, and
-            // the seed marker carries nothing.
-            "assistant/attempt", "session/end-seed", "session/title",
-            "session/title-llm-request", "compaction/summary", "compaction/prune",
-            -> null
-            "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
-                TranscriptItem.ToolCall(
-                    key = key,
-                    callId = call.callId,
-                    name = call.name,
-                    arguments = call.arguments,
-                    rawArguments = call.rawArguments,
-                    result = null,
-                    status = TranscriptItem.ToolCall.Status.RUNNING,
-                )
-            } ?: TranscriptItem.Activity(key, event.label, event.detail)
-            // tool/result must produce a row even though it is never rendered:
-            // pairToolResults needs the row to fold into its call, and hiding it
-            // here left every tool stuck at "running".
-            "tool/result" -> {
-                val result = EventPayload.toolResultOf(event)
-                TranscriptItem.ToolResultRow(key, result?.toolCallId, result?.text, result?.isError ?: false)
-            }
-            else -> if (text != null) TranscriptItem.Activity(key, event.label, text.take(400))
-            else TranscriptItem.Activity(key, event.label, event.detail)
-        }
-    }
 
     /**
      * Fold every `tool/result` row into the `tool/call` row it answers.
@@ -1759,3 +1665,113 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
  * Pure, so the shape of a replayed history can be tested against a captured
  * run rather than only against a live Host.
  */
+
+
+internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
+    // `turn:<turn>:<seq>`: the turn is part of the key because the usage row
+    // is placed under the last row of its turn, and the renderer draws a
+    // stream of rows with no turn model of its own. A key of `seq-<n>` left
+    // that lookup with nothing to read.
+    val turn = (event.data as? JsonObject)?.get("turn")?.jsonPrimitive?.intOrNull
+    val key = if (turn == null) "seq-${event.seq}" else "turn:$turn:${event.seq}"
+    val text = event.text
+    return when (event.type) {
+        "user/message" -> when {
+            // A `user/message` whose source is not the user is the harness or
+            // another agent talking; only `kind == "user"` is a person typing.
+            // The distinction is the source kind and not the plugin field,
+            // because a relayed subagent message carries no plugin name.
+            EventPayload.isHiddenSource(event) -> null
+            EventPayload.isNotice(event) -> {
+                val kind = EventPayload.sourceKind(event)
+                val plugin = EventPayload.noticePlugin(event)
+                TranscriptItem.Notice(
+                    key = key,
+                    label = noticeLabel(plugin, kind),
+                    plugin = plugin,
+                    sender = EventPayload.senderSessionId(event),
+                    body = EventPayload.noticeSummary(event) ?: text,
+                )
+            }
+            text != null -> TranscriptItem.User(key, text)
+            else -> null
+        }
+        // An assistant message may carry only tool calls and no prose, which
+        // is a normal step rather than a renderable reply.
+        // A message with no text block carries only reasoning or tool calls,
+        // which are steps rather than a reply. Rendering nothing is correct;
+        // falling through printed the literal event name.
+        "assistant/message" -> text?.let { TranscriptItem.Assistant(key, it, streaming = false) }
+        // A turn that failed says so; a clean one is implied by the next
+        // message and a row per turn would just be noise.
+        "turn/end" -> EventPayload.turnOutcome(event)?.let { TranscriptItem.Note(key, it) }
+        "todo/write" -> EventPayload.todoList(event)?.let { TranscriptItem.Todo(key, it) }
+        "deliverables/presented" -> EventPayload.deliveredFiles(event)?.let {
+            TranscriptItem.Deliverables(key, it, workspaceRoot)
+        }
+        // Model switches and session settings are facts about the session
+        // rather than turns: one compact line each, no card.
+        "model/selection" -> EventPayload.modelChoice(event)?.let { choice ->
+            val effort = choice.effort?.let { " · $it" } ?: ""
+            TranscriptItem.Note(key, "model: ${choice.provider}/${choice.model}$effort")
+        }
+        "permission/preset", "sandbox/mode", "approval/policy",
+        "compaction/start", "compaction/end",
+        -> EventPayload.settingChange(event)?.let { (name, value) ->
+            TranscriptItem.Note(key, "$name: $value")
+        }
+        // Rendering every step boundary and inbox splice buries the
+        // conversation: one sampled turn produced hundreds of such rows
+        // against 41 assistant messages.
+        "turn/start", "step/start", "step/end", "agent/inbox/spliced",
+        "request/header", "request/context",
+        // Raw stream chunks: the message they assemble into is rendered, and
+        // the seed marker carries nothing.
+        "assistant/attempt", "session/end-seed", "session/title",
+        "session/title-llm-request", "compaction/summary", "compaction/prune",
+        -> null
+        "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
+            TranscriptItem.ToolCall(
+                key = key,
+                callId = call.callId,
+                name = call.name,
+                arguments = call.arguments,
+                rawArguments = call.rawArguments,
+                result = null,
+                status = TranscriptItem.ToolCall.Status.RUNNING,
+            )
+        } ?: TranscriptItem.Activity(key, event.label, event.detail)
+        // tool/result must produce a row even though it is never rendered:
+        // pairToolResults needs the row to fold into its call, and hiding it
+        // here left every tool stuck at "running".
+        "tool/result" -> {
+            val result = EventPayload.toolResultOf(event)
+            TranscriptItem.ToolResultRow(key, result?.toolCallId, result?.text, result?.isError ?: false)
+        }
+        else -> if (text != null) TranscriptItem.Activity(key, event.label, text.take(400))
+        else TranscriptItem.Activity(key, event.label, event.detail)
+    }
+}
+
+internal fun usageAwareItems(
+    records: List<SessionEvent>,
+    workspaceRoot: String? = null,
+): List<TranscriptItem> {
+    // The decision -- how much each turn cost and where the row goes -- is a
+    // pure function over the raw wire objects (see `usageRowsFor`), so it can
+    // be tested without a Host. This method only maps the surrounding rows.
+    val wire = records.map { record ->
+        buildJsonObject {
+            put("seq", JsonPrimitive(record.seq))
+            put("type", JsonPrimitive(record.type))
+            put("data", record.data)
+        }
+    }
+    val usageAfter = usageRowsFor(wire).groupBy({ it.first }, { it.second })
+    val out = ArrayList<TranscriptItem>(records.size + 4)
+    records.forEachIndexed { index, record ->
+        toItem(record, workspaceRoot)?.let(out::add)
+        usageAfter[index]?.forEach(out::add)
+    }
+    return out
+}

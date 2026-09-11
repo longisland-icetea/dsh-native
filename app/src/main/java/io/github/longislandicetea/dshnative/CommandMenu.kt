@@ -123,3 +123,41 @@ object CommandMenu {
         return trimmed
     }
 }
+
+/**
+ * Whether a draft that was just submitted may be cleared, and why not when it
+ * may not.
+ *
+ * The composer used to clear the field first and let the send path decide what to
+ * do with the text, which meant every refusal -- no client yet, no open
+ * conversation, a missing waterfall id, a blank line -- destroyed what the reader
+ * wrote and said nothing. A message that is not sent has to stay in the box.
+ *
+ * Pure so the rule is one place rather than repeated at each of the four actions
+ * that submit from the composer.
+ */
+internal enum class DraftOutcome {
+    /** The text was handed to something that will send it; clear the field. */
+    Accepted,
+
+    /** Keep the field, with this reason shown to the reader. */
+    Refused;
+
+    val clearsDraft: Boolean get() = this == Accepted
+}
+
+/**
+ * Decide whether the draft leaves the composer.
+ *
+ * `ready` is the caller's own precondition -- a client and an open conversation
+ * for a prompt, the same plus a loaded command list for a command -- and `text`
+ * the draft, because an empty one is not a message worth keeping.
+ */
+internal fun draftOutcome(ready: Boolean, text: String): DraftOutcome = when {
+    text.isBlank() -> DraftOutcome.Refused
+    !ready -> DraftOutcome.Refused
+    else -> DraftOutcome.Accepted
+}
+
+/** The line shown when a draft could not be sent, so the refusal is not silent. */
+internal const val DRAFT_REFUSED = "Not sent: the connection is not ready. Your message is still here."
