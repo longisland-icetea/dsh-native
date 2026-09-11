@@ -1664,6 +1664,17 @@ private fun NoticeCard(item: TranscriptItem.Notice) {
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.SemiBold,
             )
+            // A subagent message names its sender; which one spoke is the point.
+            item.sender?.let {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "from " + it.takeLast(8),
+                    color = Color(0xFF7C8598),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                )
+            }
             // Only a scoped plugin name carries information the short label lost.
             item.plugin?.takeIf { it.contains('/') }?.let {
                 Spacer(Modifier.width(8.dp))

@@ -15,7 +15,7 @@ Column meanings:
 
 | type | render | why |
 |---|---|---|
-| `user/message` | bubble, or notice card when `source.kind == "plugin"` | the harness talks about its own work; a job result is machinery, not a person |
+| `user/message` | bubble when `source.kind == "user"`, otherwise a notice card (or hidden) | the harness talks about its own work; a job result is machinery, not a person |
 | `assistant/message` | markdown bubble | the reply itself |
 | `tool/call` | tool card with arguments | the one line that makes a tool-heavy turn scannable |
 | `tool/result` | folded into its call | a separate row doubles every tool's height |
@@ -24,6 +24,23 @@ Column meanings:
 | `model/selection` | model chip | answers "which model is this" without opening settings |
 | `turn/end` | note when it carries a reason | a failed turn otherwise ends silently |
 | `compaction/*` | compaction boundary note | the transcript has no other marker that history was summarized away |
+
+## `user/message` source kinds
+
+A `user/message` is the envelope for everything the harness injects, not just for
+what a person typed. The discriminator is `source.kind`, and only `user` is a
+person — an earlier classifier tested for `plugin`, which sent relayed subagent
+messages and settle notices to the human bubble.
+
+| kind | form | render |
+|---|---|---|
+| `user` | — | the human's bubble |
+| `plugin` | `notice` | notice card, titled by plugin (`tool-jobs`, `model-selection`, …) |
+| `plugin` | `snapshot` | notice card; the runtime context snapshot |
+| `agent-message` | `relay` | notice card titled "agent message", with `senderSessionId` |
+| `subagent-settled` | `notice` | notice card titled "subagent", `summary` as the body, with sender |
+| `agent-instructions` | `instructions` | hidden: injected input, repeats on every change |
+| `skill-catalog` | `catalog` | hidden: capability listing, not conversation |
 
 ## Hidden on purpose
 

@@ -579,11 +579,32 @@ object EventPayload {
      * carries `source.kind == "user"`.
      */
     /**
+     * The `source.kind` of a message, e.g. `plugin`, `agent-message`, `user`.
+     *
+     * This is the field that says who produced a message, and it is a wider set
+     * than `plugin`: a relayed subagent message is `agent-message`, a subagent
+     * finishing is `subagent-settled`, a skill catalog is `skill-catalog`, and an
+     * instructions update is `agent-instructions`. Only `user` is a person.
+     */
+    fun sourceKind(event: SessionEvent): String? =
+        ((event.data as? JsonObject)?.get("source") as? JsonObject)
+            ?.get("kind")?.jsonPrimitive?.contentOrNull
+
+    /**
+     * The session a relayed message came from, when it came from another agent.
+     *
+     * Present on `agent-message` and `subagent-settled`; absent on the user's own
+     * messages, which is another way to tell them apart.
+     */
+    fun senderSessionId(event: SessionEvent): String? =
+        ((event.data as? JsonObject)?.get("source") as? JsonObject)
+            ?.get("senderSessionId")?.jsonPrimitive?.contentOrNull
+
+    /**
      * The plugin that emitted a notice, e.g. `tool-jobs` or `model-selection`.
      *
-     * `source.kind == "plugin"` marks a message as the harness reporting its own
-     * state rather than a person typing; the plugin name is the stable part of
-     * that report and `summary` is often absent.
+     * The plugin name is the stable part of a `plugin` notice; `summary` is often
+     * absent. Null for every other kind, so a caller can fall back to the kind.
      */
     fun noticePlugin(event: SessionEvent): String? {
         val source = (event.data as? JsonObject)?.get("source") as? JsonObject ?: return null
@@ -696,9 +717,29 @@ object EventPayload {
         }
     }
 
+    /**
+     * Whether a `user/message` was produced by the harness and not by a person.
+     *
+     * The test is "kind is present and is not `user`", not "kind is `plugin`":
+     * matching only `plugin` let relayed subagent messages, subagent settle
+     * notices, skill catalogs, and instructions updates fall through to the human
+     * bubble, which rendered machine reports as if the user had typed them.
+     */
     fun isNotice(event: SessionEvent): Boolean {
-        val source = (event.data as? JsonObject)?.get("source") as? JsonObject ?: return false
-        return source["kind"]?.jsonPrimitive?.contentOrNull == "plugin"
+        val kind = sourceKind(event) ?: return false
+        return kind != "user"
+    }
+
+    /**
+     * Kinds that are the harness talking to itself and should not be shown at all.
+     *
+     * An instructions update and a skill catalog are inputs the harness injects,
+     * not turns of the conversation: they are long, they repeat on every change,
+     * and the reader never acts on them from a phone.
+     */
+    fun isHiddenSource(event: SessionEvent): Boolean = when (sourceKind(event)) {
+        "agent-instructions", "skill-catalog" -> true
+        else -> false
     }
 
     /**

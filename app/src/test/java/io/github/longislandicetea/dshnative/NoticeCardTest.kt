@@ -52,6 +52,39 @@ class NoticeCardTest {
         """{"content":[{"type":"text","text":"hello"}],"source":{"kind":"user"}}""",
     )
 
+    /**
+     * A relayed subagent message.
+     *
+     * The bug this exists for: detection tested `source.kind == "plugin"`, so a
+     * relay (`agent-message`) fell through to the human bubble and a subagent's
+     * report appeared as if the user had typed it.
+     */
+    private val relayed = event(
+        """{"content":[{"type":"text","text":"Agent aaaa1111-2222-3333-4444-555566667777 sent a message:"},
+           {"type":"text","text":"DONE — figure rebuilt."}],
+           "source":{"kind":"agent-message","form":"relay","senderSessionId":"aaaa1111-2222-3333-4444-555566667777"}}""",
+    )
+
+    /** A subagent finishing, which carries a summary and its sender. */
+    private val settled = event(
+        """{"content":[{"type":"text","text":"Background subagent aaaa1111 finished and will do no further work."},
+           {"type":"text","text":"Its closing message:"},{"type":"reasoning","text":"thinking"}],
+           "source":{"kind":"subagent-settled","form":"notice",
+           "summary":"Background subagent aaaa1111 failed before it finished.",
+           "senderSessionId":"aaaa1111-2222-3333-4444-555566667777"}}""",
+    )
+
+    /** Harness-injected inputs: long, repetitive, and not conversation. */
+    private val instructions = event(
+        """{"content":[{"type":"text","text":"<system-reminder> Additional instructions from: AGENTS.md"}],
+           "source":{"kind":"agent-instructions","form":"instructions"}}""",
+    )
+
+    private val skillCatalog = event(
+        """{"content":[{"type":"text","text":"<system-reminder> A skill is a reusable set of task-specific instructions"}],
+           "source":{"kind":"skill-catalog","form":"catalog","entries":[]}}""",
+    )
+
     @Test
     fun `a background job is recognised as a plugin notice`() {
         assertEquals("tool-jobs", EventPayload.noticePlugin(toolsJob))
@@ -82,6 +115,61 @@ class NoticeCardTest {
     fun `a human message is not a notice`() {
         assertNull(EventPayload.noticePlugin(human))
         assertEquals(false, EventPayload.isNotice(human))
+        assertEquals("user", EventPayload.sourceKind(human))
+    }
+
+    @Test
+    fun `a relayed subagent message is a notice, not a user message`() {
+        assertEquals("agent-message", EventPayload.sourceKind(relayed))
+        assertEquals(true, EventPayload.isNotice(relayed))
+        assertEquals(false, EventPayload.isHiddenSource(relayed))
+        // No plugin name: the card falls back to the kind, and the sender is what
+        // says which subagent spoke.
+        assertNull(EventPayload.noticePlugin(relayed))
+        assertEquals("aaaa1111-2222-3333-4444-555566667777", EventPayload.senderSessionId(relayed))
+    }
+
+    @Test
+    fun `a settled subagent is a notice with a summary and a sender`() {
+        assertEquals("subagent-settled", EventPayload.sourceKind(settled))
+        assertEquals(true, EventPayload.isNotice(settled))
+        assertEquals(false, EventPayload.isHiddenSource(settled))
+        assertEquals(
+            "Background subagent aaaa1111 failed before it finished.",
+            EventPayload.noticeSummary(settled),
+        )
+        assertEquals("aaaa1111-2222-3333-4444-555566667777", EventPayload.senderSessionId(settled))
+    }
+
+    @Test
+    fun `injected instructions and the skill catalog are hidden`() {
+        // These repeat on every change and are inputs to the harness, not turns of
+        // the conversation; before the fix they rendered as user bubbles.
+        for (injected in listOf(instructions, skillCatalog)) {
+            assertEquals(true, EventPayload.isHiddenSource(injected))
+        }
+        assertEquals(false, EventPayload.isHiddenSource(relayed))
+        assertEquals(false, EventPayload.isHiddenSource(human))
+    }
+
+    @Test
+    fun `every non-user source is machinery`() {
+        // The rule itself, stated once: only `kind == "user"` is a person.
+        val kinds = listOf("plugin", "agent-message", "subagent-settled", "agent-instructions", "skill-catalog")
+        for (kind in kinds) {
+            val e = event("""{"content":[{"type":"text","text":"x"}],"source":{"kind":"$kind"}}""")
+            assertEquals("$kind must be machinery", true, EventPayload.isNotice(e))
+        }
+    }
+
+    @Test
+    fun `a message with no source kind keeps its old behaviour`() {
+        // Absent kind: a fallback target with no source is not a notice, and the
+        // classifier must not crash on it.
+        val noSource = event("""{"content":[{"type":"text","text":"hi"}]}""")
+        assertNull(EventPayload.sourceKind(noSource))
+        assertEquals(false, EventPayload.isNotice(noSource))
+        assertEquals(false, EventPayload.isHiddenSource(noSource))
     }
 
     @Test

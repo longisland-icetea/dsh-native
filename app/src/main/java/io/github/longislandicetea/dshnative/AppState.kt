@@ -121,15 +121,17 @@ data class PendingInteraction(
 
 /** One row in the transcript. */
 /**
- * The card header for a notice: the plugin's short name.
+ * The card header for a notice: the plugin's short name, or the source kind.
  *
  * `source.plugin` is a package path for built-ins (`tool-jobs`) but a scope path
  * for others (`@deepseek-ai/dsh-system-prompt`); the trailing segment is the part
- * a reader recognises.
+ * a reader recognises. Kinds that are not plugin notices fall back to the kind
+ * itself with its dashes opened up -- `agent-message` reads as "agent message".
  */
-private fun noticeLabel(plugin: String?): String {
+private fun noticeLabel(plugin: String?, kind: String?): String {
     val name = plugin?.substringAfterLast('/')?.removePrefix("@")?.removePrefix("dsh-")
-    return name?.takeIf { it.isNotBlank() } ?: "notice"
+    if (!name.isNullOrBlank()) return name
+    return kind?.replace('-', ' ')?.takeIf { it.isNotBlank() } ?: "notice"
 }
 
 sealed interface TranscriptItem {
@@ -176,6 +178,13 @@ sealed interface TranscriptItem {
         override val key: String,
         val label: String,
         val plugin: String?,
+        /**
+         * The subagent that sent this, when it came from one.
+         *
+         * A relayed message and a settle notice both name their sender, and which
+         * subagent spoke is the whole point of showing the card.
+         */
+        val sender: String?,
         val body: String?,
     ) : TranscriptItem
 
@@ -1014,16 +1023,19 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         val text = event.text
         return when (event.type) {
             "user/message" -> when {
-                // A plugin-sourced user message is the harness talking to
-                // itself; only a human prompt is rendered as one.
-                // A background-job result is the harness reporting a job, so it
-                // is presented like a tool call rather than as chat text.
+                // A `user/message` whose source is not the user is the harness or
+                // another agent talking; only `kind == "user"` is a person typing.
+                // The distinction is the source kind and not the plugin field,
+                // because a relayed subagent message carries no plugin name.
+                EventPayload.isHiddenSource(event) -> null
                 EventPayload.isNotice(event) -> {
+                    val kind = EventPayload.sourceKind(event)
                     val plugin = EventPayload.noticePlugin(event)
                     TranscriptItem.Notice(
                         key = key,
-                        label = noticeLabel(plugin),
+                        label = noticeLabel(plugin, kind),
                         plugin = plugin,
+                        sender = EventPayload.senderSessionId(event),
                         body = EventPayload.noticeSummary(event) ?: text,
                     )
                 }
