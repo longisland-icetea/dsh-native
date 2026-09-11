@@ -57,10 +57,10 @@ class EventDecodeTest {
         val files = EventPayload.deliveredFiles(
             event(
                 """{"type":"deliverables/presented","seq":342,"time":1,"data":{"turn":1,"callId":"c1",
-                   "files":[{"path":"/home/cxxiao/report.md","description":"audit report"}]}}""",
+                   "files":[{"path":"/home/example/report.md","description":"audit report"}]}}""",
             ),
         )
-        assertEquals("/home/cxxiao/report.md", files?.single()?.path)
+        assertEquals("/home/example/report.md", files?.single()?.path)
         assertEquals("audit report", files?.single()?.description)
     }
 

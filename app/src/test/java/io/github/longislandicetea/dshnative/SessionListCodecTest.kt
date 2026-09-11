@@ -18,6 +18,12 @@ import org.junit.Test
  * sessions".
  */
 class SessionListCodecTest {
+    /**
+     * A capture of `session/list`, scrubbed of everything that identified a real
+     * session: the ids, the working directory, the title and the prompts and
+     * replies inside `turnOutline` are replaced. The shapes are what this fixture
+     * is for, and the scrub preserves them -- including which fields are absent.
+     */
     private fun fixture(): JsonObject {
         val text = checkNotNull(javaClass.classLoader?.getResourceAsStream("session-list.json")) {
             "session-list.json fixture missing"

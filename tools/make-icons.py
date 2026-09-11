@@ -24,6 +24,7 @@ cut out rather than filled, so it reads as an outline.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -31,10 +32,36 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = Path(
-    "/home/cxxiao/.local/node-22.23.2/lib/node_modules/@deepseek-ai/dsh/node_modules/"
-    "@deepseek-ai/dsh-web-frontend/dist/favicon.svg"
-)
+
+
+def find_source() -> Path:
+    """Locate the harness's favicon in this machine's DSH installation.
+
+    Not a fixed path: the install location differs per machine (a global npm tree,
+    `~/.local`, a profile directory), and a public checkout has to work on someone
+    else's. `DSH_FAVICON` overrides the search.
+    """
+    override = os.environ.get("DSH_FAVICON")
+    if override:
+        return Path(override)
+    pattern = "**/node_modules/@deepseek-ai/dsh-web-frontend/dist/favicon.svg"
+    roots = [
+        Path.home() / ".local/node-22.23.2/lib",
+        Path.home() / ".local/lib",
+        Path.home() / ".dsh/profiles",
+        Path("/usr/lib"),
+        Path("/usr/local/lib"),
+    ]
+    for root in roots:
+        for hit in sorted(root.glob(pattern)):
+            return hit
+    raise SystemExit(
+        "favicon.svg not found; set DSH_FAVICON to the harness's "
+        "@deepseek-ai/dsh-web-frontend/dist/favicon.svg"
+    )
+
+
+SOURCE = find_source()
 RES = ROOT / "app/src/main/res"
 
 # Black on white. The mark is a thin outline with holes (see `render_mark`), so it
