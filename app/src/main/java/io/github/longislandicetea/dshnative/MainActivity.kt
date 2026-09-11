@@ -15,13 +15,16 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -83,6 +86,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -922,6 +926,15 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         if (lastIndex > 0) listState.animateScrollToItem(lastIndex)
     }
 
+    // Opening a conversation must not raise the keyboard: the field is there to be
+    // tapped, and a session that opens under a keyboard hides the transcript the
+    // reader came for. `stateAlwaysHidden` covers the window regaining focus;
+    // clearing focus covers the field holding it across a configuration change.
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(conversation.sessionId) {
+        focusManager.clearFocus(force = true)
+    }
+
     Column(Modifier.fillMaxSize().imePadding()) {
         LazyColumn(
             state = listState,
@@ -1239,55 +1252,191 @@ private fun ProseBlock(block: MarkdownBlock.Prose) {
     }
 }
 
+/** Cell padding, shared so the header and body columns line up. */
+private val TABLE_CELL_PADDING = 8.dp
+private val TABLE_RULE = Color(0xFF2A2F38)
+private val TABLE_STRIPE = Color(0xFF1B1F27)
+
 /**
- * A pipe table, laid out with real columns and horizontal scroll.
+ * A pipe table: proportional columns, ruled cells, and sideways scroll.
  *
- * Wrapping a table into prose loses the alignment that makes it a table, so the
- * whole thing scrolls sideways instead. Column weights come from the header
- * widths, which is what makes a narrow first column stay narrow.
+ * Sizing by the *widest* cell in each column, instead of by the header, is what
+ * stops columns from being too narrow to read and then wrapping into a shape that
+ * is no longer a table. Weights are then normalised to fill the width, with a
+ * floor and a ceiling: the floor keeps a short column clickable, and the ceiling
+ * stops one chatty column from squeezing the rest to nothing.
+ *
+ * Every cell is ruled and every other row is tinted. A phone shows four or five
+ * rows at a time, so losing the row line costs the reader their place; the rules
+ * are what make a dense result table scannable rather than a wall of numbers.
  */
 @Composable
 private fun TableBlock(table: MarkdownBlock.Table) {
     val columns = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
     if (columns == 0) return
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .background(Color(0xFF171A20), RoundedCornerShape(6.dp))
-            .padding(vertical = 4.dp),
-    ) {
-        Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
-            table.header.forEach { cell ->
-                Text(
-                    text = SimpleMarkdown.inline(cell, ACCENT, Color(0xFF8FD6FF)),
-                    color = ACCENT,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    modifier = Modifier.width(columnWidth(cell)),
-                )
-            }
-        }
-        HorizontalDivider(color = Color(0xFF2A2F38))
-        table.rows.forEach { row ->
-            Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
-                for (index in 0 until columns) {
-                    Text(
-                        text = SimpleMarkdown.inline(row.getOrElse(index) { "" }, ACCENT, Color(0xFF8FD6FF)),
-                        color = Color(0xFFB9C1CE),
-                        fontSize = 12.sp,
-                        modifier = Modifier.width(columnWidth(row.getOrElse(index) { "" })),
+
+    val weights = remember(table) { columnWeights(table, columns) }
+
+    // The grid needs a *bounded* width or `weight` cannot resolve: inside
+    // `horizontalScroll` the width constraint is infinite, and `Row` skips
+    // weighing under infinite constraints -- which measured every column as zero
+    // and rendered an empty frame. `BoxWithConstraints` supplies the viewport
+    // width to lay the grid out against; the scroll stays as the overflow path
+    // for a wide table.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val viewport = maxWidth
+        // A floor so a table with many columns does not collapse into unreadable
+        // slivers, and a ceiling so a wide one does not scroll forever.
+        val gridWidth = maxOf(viewport, TABLE_CELL_FLOOR * columns)
+
+        Column(
+            Modifier
+                .horizontalScroll(rememberScrollState())
+                .background(Color(0xFF171A20), RoundedCornerShape(6.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            Row(Modifier.width(gridWidth).height(IntrinsicSize.Min)) {
+                table.header.forEachIndexed { index, cell ->
+                    TableCell(
+                        text = cell,
+                        weight = weights.getOrElse(index) { 1f / columns },
+                        header = true,
+                        last = index == columns - 1,
                     )
+                }
+            }
+            HorizontalDivider(color = TABLE_RULE, thickness = 1.dp)
+            table.rows.forEachIndexed { rowIndex, row ->
+                Row(
+                    Modifier
+                        .width(gridWidth)
+                        // `IntrinsicSize.Min` is what gives the vertical rules a
+                        // height: without a bounded height `fillMaxHeight` inside
+                        // resolves to nothing and the rules vanish.
+                        .height(IntrinsicSize.Min)
+                        .background(if (rowIndex % 2 == 1) TABLE_STRIPE else Color.Transparent),
+                ) {
+                    for (index in 0 until columns) {
+                        TableCell(
+                            text = row.getOrElse(index) { "" },
+                            weight = weights.getOrElse(index) { 1f / columns },
+                            header = false,
+                            last = index == columns - 1,
+                        )
+                    }
+                }
+                if (rowIndex != table.rows.lastIndex) {
+                    HorizontalDivider(color = TABLE_RULE.copy(alpha = 0.5f), thickness = 0.5.dp)
                 }
             }
         }
     }
 }
 
-/** Column width from content length, clamped so one long cell cannot eat the row. */
-private fun columnWidth(cell: String) =
-    (cell.length.coerceIn(6, 34) * 7).dp
+/** Narrowest a column may be laid out at before the grid starts scrolling. */
+private val TABLE_CELL_FLOOR = 72.dp
+
+/**
+ * Relative width of each column, from the widest cell it has to hold.
+ *
+ * Two steps, because either one alone produces a bad table. The raw weights come
+ * from content length, capped per cell so one chatty column cannot dwarf the
+ * rest. Normalising those alone is not enough: with three columns of 40/4/4
+ * characters the long one takes 83% and the other two are unreadable. So the
+ * normalised shares are then water-filled -- any share above the ceiling is
+ * pinned there and the remainder is redistributed among the others -- which is
+ * what actually guarantees the floor.
+ *
+ * Pure and internal so the arithmetic can be asserted (`TableLayoutTest`): the
+ * first attempt at proportional columns measured every column as zero and drew an
+ * empty frame, and a device check alone would not have said which part was wrong.
+ */
+internal fun columnWeights(table: MarkdownBlock.Table, columns: Int): List<Float> {
+    if (columns <= 0) return emptyList()
+    val widest = (0 until columns).map { index ->
+        val header = table.header.getOrElse(index) { "" }
+        val body = table.rows.maxOfOrNull { it.getOrElse(index) { "" } } ?: ""
+        // `length` counts code points, not display width; it is a stand-in for
+        // "how much text is here", which is all the weighting needs.
+        maxOf(header.length, body.length).coerceIn(MIN_CELL_CHARS, MAX_CELL_CHARS)
+    }
+
+    // A single column fills the table, and more columns than the floor allows
+    // cannot all keep it.
+    if (columns == 1) return listOf(1f)
+    val floor = minOf(MIN_SHARE, 1f / columns)
+    val ceiling = maxOf(MAX_SHARE, floor)
+
+    var remaining = 1f
+    var open = widest.indices.toMutableList()
+    val share = FloatArray(columns)
+    while (open.isNotEmpty()) {
+        val weightTotal = open.sumOf { widest[it] }.toFloat()
+        val clamped = open.filter { remaining * widest[it] / weightTotal > ceiling }
+        if (clamped.isEmpty()) {
+            open.forEach { share[it] = remaining * widest[it] / weightTotal }
+            break
+        }
+        // Pin the greedy columns at the ceiling and re-spread what is left.
+        clamped.forEach {
+            share[it] = ceiling
+            remaining -= ceiling
+        }
+        open = open.filterNot { it in clamped }.toMutableList()
+    }
+    // Whatever the ceiling left unassigned goes to the widest remaining column,
+    // so the shares always sum to the whole width.
+    val leftover = 1f - share.sum()
+    if (leftover > 1e-4f) {
+        val target = (0 until columns).maxByOrNull { share[it] } ?: 0
+        share[target] += leftover
+    }
+    return share.map { if (it < floor && columns > 1) maxOf(it, floor) else it }
+}
+
+/** Shortest a column is treated as, in characters, when weighting. */
+private const val MIN_CELL_CHARS = 4
+/** Longest, so one long cell cannot dwarf the column weighting. */
+private const val MAX_CELL_CHARS = 40
+/** Smallest share of the table a column keeps, so nothing is squeezed out. */
+private const val MIN_SHARE = 0.15f
+/** Largest share, so one column cannot flatten the others. */
+private const val MAX_SHARE = 0.7f
+
+/**
+ * One grid cell: the text, its padding, and the rule on its trailing edge.
+ *
+ * A `RowScope` extension because the column weight belongs to the enclosing row,
+ * not to a composable of its own.
+ */
+@Composable
+private fun RowScope.TableCell(text: String, weight: Float, header: Boolean, last: Boolean) {
+    Row(Modifier.weight(weight, fill = true).fillMaxHeight()) {
+        Text(
+            text = SimpleMarkdown.inline(text, ACCENT, Color(0xFF8FD6FF)),
+            color = if (header) ACCENT else Color(0xFFB9C1CE),
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
+            modifier = Modifier.padding(
+                start = TABLE_CELL_PADDING,
+                end = if (last) TABLE_CELL_PADDING else 4.dp,
+                top = 6.dp,
+                bottom = 6.dp,
+            ),
+        )
+        // The vertical rule between columns is the strongest cue that a row of
+        // numbers is a row of fields.
+        if (!last) {
+            Box(
+                Modifier
+                    .width(1.dp)
+                    .fillMaxHeight()
+                    .background(TABLE_RULE),
+            )
+        }
+    }
+}
 
 @Composable
 private fun UserBubble(text: String) {
