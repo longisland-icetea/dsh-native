@@ -106,6 +106,31 @@ build:
 Gradle merges the keep rules that prevent the first from the libraries' AARs;
 invoking R8 directly does not, so they live in `app/proguard-rules.pro`.
 
+### Signing
+
+The script signs with the debug key by default, so it works out of the box. A real
+key is passed in, and then the password is asked for on the terminal rather than
+taken from `KEYPASS` — a password in the environment reaches `ps` and the shell
+history:
+
+```sh
+KEYSTORE=~/.local/dsh-native-release.jks ./tools/build-release.sh
+```
+
+It prompts through `apksigner`, which needs no shell trickery to hide input; a
+`read -p` prompt would not work in zsh, whose `read` has no such option. `KEYPASS`
+still works and skips the prompt, for scripted builds.
+
+`./tools/check-release-key.sh` answers the other question — *is this keystore the key
+that signed the published APK?* — before you find out from users who cannot install
+the update. Wrong key, wrong password and unknown alias each produce a distinct
+nonzero exit, and it takes `CERT_SHA256` to expect a different fingerprint. The
+keystore and its password are kept apart on purpose, so this gets asked eventually.
+
+Both scripts assume the keystore and key passwords are the same, which is how CI's
+secrets are set up. If they ever diverge, pass `KEYPASS` and the key password
+separately by editing the `apksigner sign` line.
+
 ## Testing against a live harness
 
 Some of this app's behaviour can only be checked against a running DSH, and that

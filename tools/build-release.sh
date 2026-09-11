@@ -97,14 +97,28 @@ cp "$DEBUG_OUT/base.apk" "$OUT/unsigned.apk"
 ( cd "$OUT/classes" && zip -q -X -r "$OUT/unsigned.apk" ./*.dex META-INF )
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
+# The debug key exists only so `tools/build-release.sh` works out of the box. A real
+# release key is passed in, and then the password must be too: falling back to a
+# default password for someone else's keystore would look like a successful signing
+# run right up until the keystore refused it.
 KEYSTORE="${KEYSTORE:-$HOME/.local/dsh-native-debug.jks}"
-KEYPASS="${KEYPASS:-android}"
 KEYALIAS="${KEYALIAS:-dshnative}"
 echo "== apksigner (keystore: $KEYSTORE)"
-"$BT/apksigner" sign \
-  --ks "$KEYSTORE" --ks-pass "pass:$KEYPASS" \
-  --ks-key-alias "$KEYALIAS" --key-pass "pass:$KEYPASS" \
-  --out "$ROOT/build/dsh-native-release.apk" "$OUT/aligned.apk"
+
+# Prompt on the terminal rather than taking the password from an environment
+# variable: it then works in any shell (zsh's `read` has no -p) and never reaches
+# `ps` or the shell history. `read -rs` with no `-p` is the one form both bash and
+# zsh accept, so the prompt is printed by hand.
+sign_args=(--ks "$KEYSTORE" --ks-key-alias "$KEYALIAS")
+if [ -n "${KEYPASS:-}" ]; then
+  "$BT/apksigner" sign "${sign_args[@]}" \
+    --ks-pass "pass:$KEYPASS" --key-pass "pass:$KEYPASS" \
+    --out "$ROOT/build/dsh-native-release.apk" "$OUT/aligned.apk"
+else
+  echo "   (leave the password empty to cancel)"
+  "$BT/apksigner" sign "${sign_args[@]}" \
+    --out "$ROOT/build/dsh-native-release.apk" "$OUT/aligned.apk"
+fi
 "$BT/apksigner" verify --print-certs "$ROOT/build/dsh-native-release.apk" | head -3
 
 if "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$ROOT/build/dsh-native-release.apk" 2>/dev/null \
