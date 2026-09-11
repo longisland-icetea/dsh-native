@@ -1062,21 +1062,24 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
         if (total > 0) listState.scrollToItem(total - 1)
     }
 
-    LaunchedEffect(listState, conversation.sessionId) {
-        snapshotFlow { newestKey to liveText }
-            .distinctUntilChanged()
-            .collect {
-                if (!atBottom) return@collect
-                val lastIndex = total - 1 + if (liveText.isNotEmpty()) 1 else 0
-                if (lastIndex < 0) return@collect
-                // Scroll to the *end* of the row, not to its top: `scrollToItem`
-                // puts the item at the top of the viewport, which for a tall
-                // transcript row means the reader lands on the beginning of the
-                // newest message while everything below it is off-screen -- a
-                // follow that looked like it kept jumping backwards.
-                val reach = listState.layoutInfo.viewportEndOffset + listState.layoutInfo.beforeContentPadding
-                listState.animateScrollToItem(lastIndex, reach)
-            }
+    // Follow the newest row while the reader is at the bottom.
+    //
+    // Keyed on the newest key and the live text length rather than driven by a
+    // `snapshotFlow`: reading `Conversation`'s fields from a snapshot observer
+    // registers no dependency (it is a stable type), and reading the `state`
+    // delegate from one did not observe updates either -- both produced a flow that
+    // emitted once and never again, which is a follow that never follows. An effect
+    // keyed on the values themselves is restart-based and cannot miss a change.
+    LaunchedEffect(newestKey, liveText.length, atBottom) {
+        if (!atBottom) return@LaunchedEffect
+        // `scrollToItem`, not `animateScrollToItem`: the animation is cancelled and
+        // restarted by the next token, so it never arrives, and the reader sees a
+        // transcript that does not move.
+        val lastIndex = total - 1 + if (liveText.isNotEmpty()) 1 else 0
+        if (lastIndex >= 0) {
+            val reach = listState.layoutInfo.viewportEndOffset + listState.layoutInfo.beforeContentPadding
+            listState.scrollToItem(lastIndex, reach)
+        }
     }
 
     // Opening a conversation must not raise the keyboard: the field is there to be
