@@ -7,6 +7,8 @@ on:
   pull_request:
   workflow_dispatch:
 
+# `write` because the tagged release lane creates a release and uploads the APK;
+# every other event only reads. Scoped per job below rather than repository-wide.
 permissions:
   contents: read
 
@@ -45,6 +47,8 @@ jobs:
   # it falls back to the debug artifact instead of failing the tag build.
   release:
     name: Signed release APK
+    permissions:
+      contents: write
     # Deliberately not `needs: debug`: a debug-lane failure (artifact upload, size
     # report, a test flake) must not block publishing a signed artifact. The release
     # lane runs the same tests itself.
