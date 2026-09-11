@@ -297,4 +297,122 @@ class UsageAndQueueTest {
         assertEquals(SessionDelta.Running("session-1", false), frame)
         assertNull("a status frame for another shape is not a running flag", SessionDelta.from("api-session/status", listOf(JsonPrimitive("session-1"))))
     }
+
+    // ---- per-turn usage: the part that silently rendered nothing twice ------
+
+    /**
+     * A turn's cost is the sum of its assistant messages.
+     *
+     * Measured shape: `assistant/message` carries `{turn, step, message, usage,
+     * stream}` and `usage` is `{inputTokens, outputTokens, totalTokens,
+     * cacheReadTokens, reasoningTokens}` -- 104 of 104 assistant messages in a
+     * sampled session carried it. A turn is several steps, so its row is their
+     * sum and not the last one's.
+     */
+    @Test
+    fun a_turn_is_the_sum_of_its_steps() {
+        val usage = turnUsageOf(
+            listOf(
+                event(seq = 10, type = "assistant/message", turn = 1, output = 100, cached = 900),
+                event(seq = 11, type = "assistant/message", turn = 1, output = 50, cached = 100),
+            ),
+        )
+        assertEquals(150, usage[1]!!.outputTokens)
+        assertEquals(1_000, usage[1]!!.cacheReadTokens)
+    }
+
+    /**
+     * A finished turn keeps its total.
+     *
+     * It has to: the turn's row and the session diagram are both read from this
+     * after the turn closed. The first version dropped the turn at `turn/end`,
+     * which left the row with nothing to look up -- and the row silently never
+     * appeared, which is the bug this test exists because of.
+     */
+    @Test
+    fun a_closed_turn_keeps_its_total() {
+        val usage = turnUsageOf(
+            listOf(
+                event(seq = 10, type = "assistant/message", turn = 1, output = 100),
+                event(seq = 11, type = "turn/end", turn = 1),
+                event(seq = 12, type = "assistant/message", turn = 2, output = 7),
+            ),
+        )
+        assertEquals(100, usage[1]!!.outputTokens)
+        assertEquals(7, usage[2]!!.outputTokens)
+    }
+
+    /**
+     * A replayed event counts once. Reconnecting replays a window that overlaps
+     * what is already on screen, and counting twice would inflate every turn after
+     * a reconnect -- the failure mode is invisible, which is why it is pinned.
+     */
+    @Test
+    fun a_replayed_event_is_counted_once() {
+        val replayed = listOf(
+            event(seq = 10, type = "assistant/message", turn = 1, output = 100),
+            event(seq = 10, type = "assistant/message", turn = 1, output = 100),
+            event(seq = 11, type = "assistant/message", turn = 1, output = 100),
+        )
+        assertEquals(200, turnUsageOf(replayed)[1]!!.outputTokens)
+    }
+
+    /** Machinery with no usage contributes nothing and does not throw. */
+    @Test
+    fun events_without_usage_are_skipped() {
+        val usage = turnUsageOf(
+            listOf(
+                event(seq = 1, type = "turn/start", turn = 1),
+                event(seq = 2, type = "tool/call", turn = 1),
+                event(seq = 3, type = "assistant/message", turn = 1, output = 5),
+            ),
+        )
+        assertEquals(1, usage.size)
+        assertEquals(5, usage[1]!!.outputTokens)
+    }
+
+    /** The row lands after its turn's closing row, and once only. */
+    @Test
+    fun usage_rows_land_after_their_turn() {
+        val records = listOf(
+            event(seq = 10, type = "assistant/message", turn = 1, output = 100),
+            event(seq = 11, type = "turn/end", turn = 1),
+            // A replay of the same turn/end must not add a second row.
+            event(seq = 11, type = "turn/end", turn = 1),
+            event(seq = 12, type = "assistant/message", turn = 2, output = 7),
+        )
+        val placed = usageRowsFor(records)
+        assertEquals("one row placed", 1, placed.size)
+        assertEquals("placed after the turn/end at index 1", 1, placed.single().first)
+        assertEquals(1, placed.single().second.turn)
+        assertEquals(100, placed.single().second.usage.outputTokens)
+    }
+
+    /** A turn whose messages carried no usage gets no row, rather than a zero. */
+    @Test
+    fun a_turn_without_usage_gets_no_row() {
+        val records = listOf(
+            event(seq = 10, type = "turn/start", turn = 1),
+            event(seq = 11, type = "turn/end", turn = 1),
+        )
+        assertTrue(usageRowsFor(records).isEmpty())
+    }
+
+    /** Raw wire objects, in the shape the Host sends them. */
+    private fun event(seq: Long, type: String, turn: Int, output: Long = 0, cached: Long = 0) =
+        buildJsonObject {
+            put("seq", seq)
+            put("type", type)
+            put("data", buildJsonObject {
+                put("turn", turn)
+                if (type == "assistant/message") {
+                    put("usage", buildJsonObject {
+                        put("inputTokens", 10)
+                        put("outputTokens", output)
+                        put("cacheReadTokens", cached)
+                        put("reasoningTokens", 1)
+                    })
+                }
+            })
+        }
 }

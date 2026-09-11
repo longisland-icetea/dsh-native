@@ -1,5 +1,11 @@
 package io.github.longislandicetea.dshnative
 
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
+
 /**
  * Numbers a reader needs to judge a conversation: what it has cost and how close
  * it is to being compacted.
@@ -119,4 +125,76 @@ fun breakdownRows(breakdown: ContextBreakdown?): List<BreakdownRow> {
         BreakdownRow("Tool definitions", b.toolsTokens),
         BreakdownRow("System prompt", b.systemTokens),
     ).filter { it.tokens > 0 }.sortedByDescending { it.tokens }
+}
+
+/**
+ * Per-turn usage over a run of events, as `turn number -> usage`.
+ *
+ * The one piece of the turn-usage feature worth testing on its own: the row only
+ * appears if this accumulates, and the first two versions of the feature rendered
+ * nothing -- once because the renderer looked up a key format that did not exist,
+ * once because the snapshot path never built the row at all. Neither was visible
+ * without a Host until this was separable.
+ *
+ * `events` are the raw `{type, seq, data}` objects, so this reads the same shape
+ * the Host sends without depending on the client's own event types.
+ */
+internal fun turnUsageOf(
+    events: List<JsonObject>,
+): Map<Int, TokenUsage> {
+    val open = HashMap<Int, TokenUsage>()
+    val counted = HashSet<Long>()
+    for (event in events) {
+        val data = event["data"] as? JsonObject ?: continue
+        val turn = data["turn"]?.let { (it as? JsonPrimitive)?.intOrNull } ?: continue
+        when (event["type"]?.let { (it as? JsonPrimitive)?.contentOrNull }) {
+            "assistant/message" -> {
+                val seq = event["seq"]?.let { (it as? JsonPrimitive)?.longOrNull }
+                    ?: continue
+                if (!counted.add(seq)) continue
+                val usage = data["usage"] ?: continue
+                val fresh = runCatching {
+                    DshWire.json.decodeFromJsonElement(TokenUsage.serializer(), usage)
+                }.getOrNull() ?: continue
+                val previous = open[turn] ?: TokenUsage()
+                open[turn] = TokenUsage(
+                    uncachedInputTokens = previous.uncachedInputTokens + fresh.uncachedInputTokens,
+                    outputTokens = previous.outputTokens + fresh.outputTokens,
+                    cacheReadTokens = previous.cacheReadTokens + fresh.cacheReadTokens,
+                    cacheWriteTokens = previous.cacheWriteTokens + fresh.cacheWriteTokens,
+                    reasoningTokens = previous.reasoningTokens + fresh.reasoningTokens,
+                )
+            }
+            // Nothing to do at the boundary: the totals stay, because both the
+            // turn's row and the session diagram are read from this map after the
+            // turn has closed. Removing the turn here -- the first version did --
+            // left the row with nothing to look up, which is why it never
+            // appeared.
+        }
+    }
+    return open
+}
+
+/**
+ * Where each turn's usage row goes: immediately after that turn's closing row.
+ *
+ * Separated from the mapper that builds the surrounding rows so the placement can
+ * be tested without a Host, and ordered this way because the figure summarises
+ * what was just read -- a row before the turn it describes reads as a prediction.
+ *
+ * Keyed by turn and emitted once, so a replayed `turn/end` cannot add a second row.
+ */
+internal fun usageRowsFor(events: List<JsonObject>): List<Pair<Int, TranscriptItem.Usage>> {
+    val perTurn = turnUsageOf(events)
+    val placed = ArrayList<Pair<Int, TranscriptItem.Usage>>()
+    val emitted = HashSet<Int>()
+    events.forEachIndexed { index, event ->
+        val type = (event["type"] as? JsonPrimitive)?.contentOrNull ?: return@forEachIndexed
+        if (type != "turn/end") return@forEachIndexed
+        val turn = ((event["data"] as? JsonObject)?.get("turn") as? JsonPrimitive)?.intOrNull
+            ?: return@forEachIndexed
+        if (!emitted.add(turn)) return@forEachIndexed
+        perTurn[turn]?.let { placed += index to TranscriptItem.Usage("usage:$turn", it, turn) }
+    }
+    return placed
 }

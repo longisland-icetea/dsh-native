@@ -1462,7 +1462,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // The snapshot is the newest window, not a delta: rebuild by seq so a
             // reconnect cannot duplicate or reorder what is already on screen.
             val merged = pairToolResults(
-                (conversation.items + frame.records.mapNotNull { toItem(it, conversation.workspaceRoot) })
+                (conversation.items + usageAwareItems(frame.records, conversation.workspaceRoot))
                     .associateBy { it.key }
                     .values
                     .sortedBy(::seqOf),
@@ -1523,7 +1523,49 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * machinery the reader does not need ([docs/event-coverage.md] has the full
      * table and the reason for each choice).
      */
-    private fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
+    /**
+     * Map one durable event to a transcript row.
+     *
+     * Needs no instance state: everything it reads is on the event, which is why
+     * the builder above can share it.
+     */
+    /**
+     * Map a run of events to rows, including the per-turn usage rows.
+     *
+     * The usage row depends on a turn's assistant messages, which precede the
+     * `turn/end` that closes the turn, so it cannot be produced one event at a
+     * time without carrying a running total. A snapshot -- replayed on
+     * reconnect, and on opening any session at all -- is the common case, so
+     * this walks the run once and appends each turn's row at its end. The live
+     * path produces the same row from the state it is already keeping.
+     *
+     * Pure and reachable from tests: the replayed shape of a history is worth
+     * pinning without a Host.
+     */
+    internal fun usageAwareItems(
+        records: List<SessionEvent>,
+        workspaceRoot: String? = null,
+    ): List<TranscriptItem> {
+        // The decision -- how much each turn cost and where the row goes -- is a
+        // pure function over the raw wire objects (see `usageRowsFor`), so it can
+        // be tested without a Host. This method only maps the surrounding rows.
+        val wire = records.map { record ->
+            buildJsonObject {
+                put("seq", JsonPrimitive(record.seq))
+                put("type", JsonPrimitive(record.type))
+                put("data", record.data)
+            }
+        }
+        val usageAfter = usageRowsFor(wire).groupBy({ it.first }, { it.second })
+        val out = ArrayList<TranscriptItem>(records.size + 4)
+        records.forEachIndexed { index, record ->
+            toItem(record, workspaceRoot)?.let(out::add)
+            usageAfter[index]?.forEach(out::add)
+        }
+        return out
+    }
+
+    internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
         // `turn:<turn>:<seq>`: the turn is part of the key because the usage row
         // is placed under the last row of its turn, and the renderer draws a
         // stream of rows with no turn model of its own. A key of `seq-<n>` left
@@ -1703,3 +1745,17 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         scope.launch(Dispatchers.IO) { runCatching { active.cancel(conversation.sessionId) } }
     }
 }
+
+/**
+ * Map a run of events to rows, including the per-turn usage rows.
+ *
+ * The usage row depends on a turn's assistant messages, which precede the
+ * `turn/end` that closes it, so it cannot be produced one event at a time
+ * without carrying the running total -- and a snapshot replayed on reconnect
+ * (or on opening a session at all) is the common case, not the rare one. This
+ * walks the run once, accumulates usage per turn, and appends the row at each
+ * turn's end, which is the same result the live path produces.
+ *
+ * Pure, so the shape of a replayed history can be tested against a captured
+ * run rather than only against a live Host.
+ */
