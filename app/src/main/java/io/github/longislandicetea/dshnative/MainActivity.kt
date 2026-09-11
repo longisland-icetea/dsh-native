@@ -622,7 +622,15 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                 TopAppBar(
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = PANEL),
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                        IconButton(onClick = {
+                            // The Host pushes session state only on a change, and does
+                            // not replay it, so anything that changed while this app
+                            // was closed or offline would leave the list stale until
+                            // a manual refresh. Opening the drawer is exactly when it
+                            // has to be right.
+                            holder.refreshSessions()
+                            scope.launch { drawerState.open() }
+                        }) {
                             Icon(Icons.Filled.Menu, contentDescription = "Sessions")
                         }
                     },
