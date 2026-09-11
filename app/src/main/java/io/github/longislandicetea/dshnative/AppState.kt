@@ -497,10 +497,12 @@ private class SessionViewStore(context: android.content.Context) {
     fun collapsed(): Set<String> = prefs.getStringSet("collapsed", emptySet()) ?: emptySet()
     fun showArchived(): Boolean = prefs.getBoolean("showArchived", false)
     fun showLog(): Boolean = prefs.getBoolean("showLog", false)
+    fun unread(): Set<String> = prefs.getStringSet("unread", emptySet()) ?: emptySet()
 
     fun saveCollapsed(value: Set<String>) = prefs.edit().putStringSet("collapsed", value).apply()
     fun saveShowArchived(value: Boolean) = prefs.edit().putBoolean("showArchived", value).apply()
     fun saveShowLog(value: Boolean) = prefs.edit().putBoolean("showLog", value).apply()
+    fun saveUnread(value: Set<String>) = prefs.edit().putStringSet("unread", value).apply()
 }
 
 class AppStateHolder(private val scope: CoroutineScope, context: android.content.Context? = null) {
@@ -514,6 +516,10 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // The transport log is off by default: it is a debugging aid, and it
             // pushes the session list up the drawer whenever it is on.
             showLog = viewStore?.showLog() ?: false,
+            // Unread survives a restart: a turn that finished while the app was
+            // closed is still something the reader has not seen, and the Host does
+            // not track read state for us.
+            unread = viewStore?.unread() ?: emptySet(),
         ),
     )
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -652,6 +658,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         when (val delta = SessionDelta.from(event, args)) {
             is SessionDelta.Running -> _state.update { current ->
                 val unread = unreadAfter(current.unread, delta.sessionId, delta.running, current.conversation?.sessionId)
+                if (unread != current.unread) viewStore?.saveUnread(unread)
                 current.copy(
                     sessions = current.sessions.map { summary ->
                         if (summary.sessionId == delta.sessionId) {
@@ -936,7 +943,13 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     /** Mark a session as looked at, which is what clears its unread state. */
     fun markRead(sessionId: String) {
         _state.update { current ->
-            if (sessionId !in current.unread) current else current.copy(unread = current.unread - sessionId)
+            if (sessionId !in current.unread) {
+                current
+            } else {
+                val next = current.unread - sessionId
+                viewStore?.saveUnread(next)
+                current.copy(unread = next)
+            }
         }
     }
 
