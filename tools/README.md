@@ -58,6 +58,44 @@ java -cp "/tmp/probe/app:$CP:/tmp/probe/out" ProbeKt
 Keep the payloads in a file rather than in Kotlin string literals: host JSON
 contains `${`, which Kotlin reads as interpolation.
 
+## Testing against a live Host, without a device
+
+`./tools/live-harness.sh` drives the app's **real** `DshClient` and
+`AppStateHolder` against a running DSH Host and reads the state back:
+
+```
+== live harness against http://192.168.255.5:3080
+ok   the mux socket connects
+ok   a sent message is on screen before the Host logs it
+ok   the Host's own copy replaces it
+ok   the steer appears in the Host's queue as steering
+ok   and the Host's inbox admits it
+ok   a message removed elsewhere says so instead of waiting forever
+ALL PASS (16 checks)
+```
+
+It is not a re-implementation: it constructs the real classes and then reads the
+same `queues`, pending rows and transcript rows the UI is drawn from. Compose
+layout is the one thing that still needs a device; every bug of the "a frame
+arrived and the state went wrong" kind is visible here.
+
+Two things make it possible:
+
+- `tools/live-harness/android/util/Log.kt` stands in for `android.util.Log`,
+  whose stub in `android.jar` throws. It is compiled into its own directory and
+  put *first* on the classpath, ahead of `android.jar`.
+- The main sources need the Compose compiler plugin, because they contain the UI
+  even though the harness never draws anything.
+
+It creates one throwaway session, works only inside it, and archives it on the
+way out; a run spends a few thousand tokens of the Host's model quota. A
+waterfall delivered to the harness is left for the human's clients to answer --
+the Host resolves one on the first answer, so a silent client cannot block it.
+
+The emulator is not an option here: WSL2 exposes no `/dev/kvm` unless the
+Windows host provides nested virtualization, which needs Windows 11 (this host
+is Windows 10 19044), and the x86_64 Android images refuse to boot without it.
+
 ## Where the event shapes come from
 
 Guessing an event payload has broken this app twice (the tool-result fold and the

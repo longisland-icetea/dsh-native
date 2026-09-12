@@ -533,9 +533,19 @@ data class AppState(
      * `turn/end` arrives. Only the open turn is kept: a finished turn's figures
      * live on its row.
      */
-    val pendingTurnUsage: Map<Int, TokenUsage> = emptyMap(),
-    /** Seqs already folded into [pendingTurnUsage], so a replay cannot double-count. */
-    val countedUsageSeqs: Set<Long> = emptySet(),
+    /**
+     * The fold's own memory for the open conversation.
+     *
+     * It has to live here, not in the loop that folds: the inbox mirror is a
+     * *delta* state -- an insert spliced at position 1 only lands if the frame
+     * before it put something at position 0 -- so a fold rebuilt from scratch on
+     * every frame silently rejects every splice that is not the first one. That
+     * is exactly what happened: the second message a client sent was never
+     * admitted, so its row could never be given up on. Null means "no
+     * conversation folded yet"; it is cleared wherever the conversation is
+     * replaced, because turn numbers and message ids restart per session.
+     */
+    val fold: TranscriptFold? = null,
     /** Slash commands the Host offers for the open conversation. */
     val commands: List<CommandInfo> = emptyList(),
     /**
@@ -624,6 +634,20 @@ private class SessionViewStore(context: android.content.Context) {
 }
 
 /**
+ * Fold one decoded follow frame into the transcript, carrying the fold's memory.
+ *
+ * The memory is the point: the inbox mirror is delta state, so a fold rebuilt
+ * from scratch rejects every splice that is not at index 0. The fold's own copy
+ * of the conversation is rebased on the live one first, because paging and the
+ * running flag write to that copy from outside the fold.
+ */
+fun AppState.folded(frame: FollowFrame): AppState {
+    val live = conversation ?: return this
+    val memory = (fold ?: TranscriptFold(live)).copy(conversation = live)
+    return withFolded(live.sessionId, foldFollowFrame(memory, frame))
+}
+
+/**
  * Adopt one folded frame into the app state.
  *
  * Only assignment: `MutableStateFlow.update` may re-run its lambda when another
@@ -640,8 +664,7 @@ internal fun AppState.withFolded(sessionId: String, folded: TranscriptFold): App
         // carries the value it read, which is older than the flag the composer
         // is drawn from.
         conversation = folded.conversation.copy(running = live.running),
-        pendingTurnUsage = folded.pendingTurnUsage,
-        countedUsageSeqs = folded.countedUsageSeqs,
+        fold = folded,
     )
 }
 
@@ -1348,10 +1371,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     running = session.running,
                     workspaceRoot = session.cwd,
                 ),
-                // Turn numbers restart per session, so a stale map would label
-                // this session's turn 2 with another session's tokens.
-                pendingTurnUsage = emptyMap(),
-                countedUsageSeqs = emptySet(),
+                // Turn numbers and message ids restart per session, so the
+                // fold's memory is not carried across.
+                fold = null,
                 selection = selection,
             )
         }
@@ -1467,6 +1489,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                                     .firstOrNull { view -> view.workspaceId == workspaceId }
                                     ?.path,
                             ),
+                            fold = null,
                         )
                     }
                     onCreated(sessionId)
@@ -1483,7 +1506,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     fun closeSession() {
         followJob?.cancel()
         followJob = null
-        _state.update { it.copy(conversation = null) }
+        _state.update { it.copy(conversation = null, fold = null) }
     }
 
     private fun openFollow(sessionId: String, title: String) {
@@ -1532,12 +1555,10 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             is MuxFrame.Item -> {
                 // The fold itself is pure and lives in TranscriptFold.kt, so a
                 // captured run of frames can be replayed against the real reducer
-                // instead of against a copy of it.
-                val folded = foldFollowFrame(
-                    TranscriptFold(conversation, before.pendingTurnUsage, before.countedUsageSeqs),
-                    FollowCodec.decode(frame.value),
-                )
-                _state.update { current -> current.withFolded(sessionId, folded) }
+                // instead of against a copy of it. It carries what it learned
+                // from the frames before this one.
+                val next = before.folded(FollowCodec.decode(frame.value))
+                next.fold?.let { folded -> _state.update { current -> current.withFolded(sessionId, folded) } }
             }
             is MuxFrame.End -> _state.update { current ->
                 val live = current.conversation ?: return@update current

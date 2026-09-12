@@ -199,6 +199,25 @@ class SteerDisplayTest {
         assertEquals("the mirror holds the message exactly once", 1, state.withFolded("s", fold).conversation!!.items.size)
     }
 
+    /**
+     * The fold's memory survives from one frame to the next.
+     *
+     * This is the bug the live harness found in one run. An inbox splice is a
+     * delta against the inbox, so an insert at index 1 only lands if the frame
+     * before it was remembered -- and the app rebuilt the fold from scratch on
+     * every frame, which silently dropped every splice that was not the first.
+     * The second message a client sent was therefore never admitted, so its row
+     * could never be given up on when the Host discarded it.
+     */
+    @Test
+    fun the_fold_memory_survives_from_one_frame_to_the_next() {
+        var state = AppState(conversation = Conversation(sessionId = "s"))
+        state = state.folded(FollowFrame.Event(splice(seq = 1, start = 0, inserted = listOf("m1"), rpcId = "rpc-a")))
+        state = state.folded(FollowFrame.Event(splice(seq = 2, start = 1, inserted = listOf("m2"), rpcId = "rpc-b")))
+        assertEquals("both inserts landed", 2, state.fold!!.inbox.nextStep.size)
+        assertTrue("so the second message is known to be pending", state.fold!!.inbox.holds("rpc-b"))
+    }
+
     /** An unreadable splice is ignored rather than corrupting the mirror. */
     @Test
     fun an_out_of_range_splice_changes_nothing() {
@@ -286,6 +305,7 @@ class SteerDisplayTest {
         removed: Int = 0,
         inserted: List<String> = emptyList(),
         outcome: String? = null,
+        rpcId: String = "rpc-1",
     ): SessionEvent = SessionEvent(
         seq = seq,
         type = "agent/inbox/spliced",
@@ -300,7 +320,7 @@ class SteerDisplayTest {
                         put("id", JsonPrimitive(id))
                         put("source", buildJsonObject {
                             put("kind", JsonPrimitive("user"))
-                            put("rpcId", JsonPrimitive("rpc-1"))
+                            put("rpcId", JsonPrimitive(rpcId))
                         })
                     })
                 }

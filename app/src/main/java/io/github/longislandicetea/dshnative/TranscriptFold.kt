@@ -18,7 +18,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * someone held a phone. Folding is a pure function of the frames, so it belongs
  * where a captured run can be replayed against it.
  */
-internal data class TranscriptFold(
+data class TranscriptFold(
     val conversation: Conversation,
     /** Usage accumulated per open turn; becomes a row when the turn closes. */
     val pendingTurnUsage: Map<Int, TokenUsage> = emptyMap(),
@@ -112,7 +112,7 @@ private fun deliveredRpcIds(frame: FollowFrame): Set<String> {
  * mirroring it here is what makes "is my message still coming?" a fact rather
  * than a guess from whichever control frame happened to arrive.
  */
-internal data class Inbox(
+data class Inbox(
     val nextTurn: List<InboxMessage> = emptyList(),
     val nextStep: List<InboxMessage> = emptyList(),
 ) {
@@ -164,7 +164,7 @@ internal data class Inbox(
     }
 }
 
-internal data class InboxUpdate(val inbox: Inbox, val discarded: Boolean)
+data class InboxUpdate(val inbox: Inbox, val discarded: Boolean)
 
 private fun merge(
     conversation: Conversation,
