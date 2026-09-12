@@ -218,6 +218,46 @@ class SteerDisplayTest {
         assertTrue("so the second message is known to be pending", state.fold!!.inbox.holds("rpc-b"))
     }
 
+    /**
+     * A session that starts being used elsewhere stops being blank.
+     *
+     * `api-session/added` arrives once, while the session is still blank, and no
+     * later frame carries the flag -- but `blank` is exactly what the drawer
+     * hides on, so a session created and used on another client stayed invisible
+     * here for good. A turn being taken is proof enough, and these two events are
+     * the only ones that say so.
+     */
+    @Test
+    fun a_session_used_elsewhere_stops_being_blank() {
+        val summary = SessionSummary(sessionId = "s1", cwd = "/tmp", blank = true)
+        val state = AppState(sessions = listOf(summary))
+
+        val afterMessage = state.withSessionDelta(SessionDelta.Activity("s1", 1_000L))
+        assertEquals("a message means it is not blank", false, afterMessage.sessions.single().blank)
+        assertEquals(1_000L, afterMessage.sessions.single().updatedAt)
+
+        val afterTurn = state.withSessionDelta(SessionDelta.Running("s1", running = true))
+        assertEquals("a turn means it is not blank", false, afterTurn.sessions.single().blank)
+        assertTrue("and it is running", afterTurn.sessions.single().running)
+    }
+
+    /** And it becomes visible under the drawer's own rule. */
+    @Test
+    fun the_used_session_shows_up_in_the_drawer() {
+        val blank = AppState(sessions = listOf(SessionSummary(sessionId = "s1", cwd = "/tmp", blank = true)))
+        val used = blank.withSessionDelta(SessionDelta.Activity("s1", 1_000L))
+        fun drawerIds(state: AppState) = SessionGroup.fromWorkspaces(
+            sessions = state.sessions,
+            workspaces = emptyList(),
+            currentId = null,
+            archived = emptySet(),
+            collapsed = emptySet(),
+            showArchived = false,
+        ).flatMap { group -> group.sessions.map { it.sessionId } }
+        assertEquals("a blank session is not listed", emptyList<String>(), drawerIds(blank))
+        assertEquals("the one that was used is", listOf("s1"), drawerIds(used))
+    }
+
     /** An unreadable splice is ignored rather than corrupting the mirror. */
     @Test
     fun an_out_of_range_splice_changes_nothing() {

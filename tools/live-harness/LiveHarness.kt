@@ -76,6 +76,18 @@ fun main(args: Array<String>): Unit = runBlocking {
     outsider.start()
     holder.connect(endpoint)
 
+    // `SessionGroup.fromWorkspaces` is the drawer's own rule -- origin, archive
+    // and blank -- so a check through it is a check on what a reader would see,
+    // not merely on what the state holds.
+    fun listed(id: String): Boolean = SessionGroup.fromWorkspaces(
+        sessions = holder.state.value.sessions,
+        workspaces = holder.state.value.workspaces,
+        currentId = holder.state.value.conversation?.sessionId,
+        archived = holder.state.value.archived,
+        collapsed = emptySet(),
+        showArchived = false,
+    ).any { group -> group.sessions.any { it.sessionId == id } }
+
     var sessionId: String? = null
     var failure: Throwable? = null
     try {
@@ -189,9 +201,16 @@ fun main(args: Array<String>): Unit = runBlocking {
         // out.
         val other = outsider.createSession(null)
         try {
-            until("the second session to appear in the list", timeoutMs = 60_000) {
+            // Created blank and never used: the drawer is right to hide it.
+            until("the blank session to appear in the state", timeoutMs = 60_000) {
                 holder.state.value.sessions.firstOrNull { it.sessionId == other }
             }
+            report.check("a blank session is not listed in the drawer", !listed(other))
+            outsider.prompt(other, "HARNESS-LISTED reply with the single word LISTED")
+            until("using it elsewhere to make it visible here", timeoutMs = 60_000) {
+                listed(other).takeIf { it }
+            }
+            report.check("a session used on another client shows up in the drawer", listed(other))
             // The Host's workspace API is archive-only -- there is no unarchive
             // to call -- so this checks the one direction that exists. A session
             // archived on another client must leave this client's list.

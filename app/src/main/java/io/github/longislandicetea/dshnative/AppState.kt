@@ -634,6 +634,48 @@ private class SessionViewStore(context: android.content.Context) {
 }
 
 /**
+ * Apply one session-list delta.
+ *
+ * Everything here is a patch to a row that already exists: a delta carries no
+ * title, no workspace and -- the one that mattered -- no `blank` flag. Two of
+ * them are nevertheless proof that a session is being used: a message from a
+ * person, and a turn starting. Treating them as proof is what makes a session
+ * created and used on another client visible here; without it the row sat in the
+ * list, blank, hidden by the drawer's own rule, for good.
+ */
+internal fun AppState.withSessionDelta(delta: SessionDelta): AppState = when (delta) {
+    is SessionDelta.Running -> copy(
+        conversation = conversation?.let { open ->
+            if (open.sessionId == delta.sessionId) open.copy(running = delta.running) else open
+        },
+        sessions = sessions.map { summary ->
+            if (summary.sessionId == delta.sessionId) {
+                summary.copy(running = delta.running, blank = false)
+            } else {
+                summary
+            }
+        },
+    )
+    is SessionDelta.Activity -> copy(
+        sessions = sessions.map { summary ->
+            if (summary.sessionId == delta.sessionId) {
+                summary.copy(updatedAt = delta.updatedAt, blank = false)
+            } else {
+                summary
+            }
+        },
+    )
+    is SessionDelta.Added -> copy(
+        sessions = if (sessions.any { it.sessionId == delta.session.sessionId }) {
+            sessions.map { if (it.sessionId == delta.session.sessionId) delta.session else it }
+        } else {
+            sessions + delta.session
+        },
+    )
+    is SessionDelta.Removed -> copy(sessions = sessions.filterNot { it.sessionId == delta.sessionId })
+}
+
+/**
  * Fold one decoded follow frame into the transcript, carrying the fold's memory.
  *
  * The memory is the point: the inbox mirror is delta state, so a fold rebuilt
@@ -725,6 +767,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var controlJob: Job? = null
     /** Bound by the `$events` ready frame; every answer must name it. */
     private var eventClientId: String? = null
+    /** When the session list was last re-read because a delta named a stranger. */
+    private var lastListRereadAt = 0L
 
     fun connect(endpoint: DshEndpoint) {
         disconnect(quiet = true)
@@ -847,57 +891,40 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * `status` and `activity` are one field each and are patched in place, which is
      * what keeps the list live without a `session/list` round trip per event.
      */
+    /**
+     * Re-read the session list because a delta named a session this client does
+     * not know.
+     *
+     * A delta is a patch: it can update a row, but it cannot create one, because
+     * it carries no title, workspace or blank flag. An unknown id therefore means
+     * this mirror is missing rows -- the app was disconnected when the session was
+     * created, or its list predates it -- and the only repair is to read the list
+     * again. Guarded, because one unknown session emits several events.
+     */
+    private fun rereadList(active: DshClient) {
+        val now = System.currentTimeMillis()
+        if (now - lastListRereadAt < 2_000) return
+        lastListRereadAt = now
+        record("session unknown to the list; re-reading it")
+        refreshSessions()
+    }
+
     private fun applySessionDelta(active: DshClient, event: String, args: List<JsonElement>) {
-        when (val delta = SessionDelta.from(event, args)) {
-            is SessionDelta.Running -> _state.update { current ->
-                val unread = unreadAfter(current.unread, delta.sessionId, delta.running, current.conversation?.sessionId)
-                if (unread != current.unread) viewStore?.saveUnread(unread)
-                current.copy(
-                    // The open conversation takes its running flag from here, so
-                    // the composer's Stop/Send control flips the moment the Host
-                    // says the turn is over rather than when a row happens to
-                    // arrive.
-                    conversation = current.conversation?.let { open ->
-                        if (open.sessionId == delta.sessionId) open.copy(running = delta.running) else open
-                    },
-                    sessions = current.sessions.map { summary ->
-                        if (summary.sessionId == delta.sessionId) {
-                            summary.copy(running = delta.running)
-                        } else {
-                            summary
-                        }
-                    },
-                    unread = unread,
-                )
-            }
-            is SessionDelta.Activity -> _state.update { current ->
-                current.copy(
-                    sessions = current.sessions.map { summary ->
-                        if (summary.sessionId == delta.sessionId) {
-                            summary.copy(updatedAt = delta.updatedAt)
-                        } else {
-                            summary
-                        }
-                    },
-                )
-            }
-            is SessionDelta.Added -> _state.update { current ->
-                val existing = current.sessions.any { it.sessionId == delta.session.sessionId }
-                current.copy(
-                    sessions = if (existing) {
-                        current.sessions.map {
-                            if (it.sessionId == delta.session.sessionId) delta.session else it
-                        }
-                    } else {
-                        current.sessions + delta.session
-                    },
-                )
-            }
-            is SessionDelta.Removed -> _state.update { current ->
-                current.copy(sessions = current.sessions.filterNot { it.sessionId == delta.sessionId })
-            }
-            null -> Unit
+        val delta = SessionDelta.from(event, args) ?: return
+        val unknown = _state.value.sessions.none { it.sessionId == delta.sessionId }
+        if (delta is SessionDelta.Running) {
+            // Read state, not the update lambda's copy: the unread rule needs the
+            // open conversation and this delta at the same time.
+            val current = _state.value
+            val unread = unreadAfter(current.unread, delta.sessionId, delta.running, current.conversation?.sessionId)
+            if (unread != current.unread) viewStore?.saveUnread(unread)
+            _state.update { state -> state.withSessionDelta(delta).copy(unread = unread) }
+        } else {
+            _state.update { state -> state.withSessionDelta(delta) }
         }
+        // A delta patches a row; it cannot create one. An id this list does not
+        // have means rows are missing, and only a re-read can supply them.
+        if (unknown) rereadList(active)
     }
 
     /**

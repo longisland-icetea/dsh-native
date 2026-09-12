@@ -110,17 +110,22 @@ sealed interface HostEvent {
  * full `session/list` round trip or a deserialised summary.
  */
 sealed interface SessionDelta {
+    /** The session this delta is about, whatever kind it is. */
+    val sessionId: String
+
     /** `api-session/status(sessionId, running)`. */
-    data class Running(val sessionId: String, val running: Boolean) : SessionDelta
+    data class Running(override val sessionId: String, val running: Boolean) : SessionDelta
 
     /** `api-session/activity(sessionId, updatedAt)` — a human sent a message. */
-    data class Activity(val sessionId: String, val updatedAt: Long) : SessionDelta
+    data class Activity(override val sessionId: String, val updatedAt: Long) : SessionDelta
 
     /** `api-session/added(summary)`: a session appeared, or its shape changed. */
-    data class Added(val session: SessionSummary) : SessionDelta
+    data class Added(val session: SessionSummary) : SessionDelta {
+        override val sessionId: String get() = session.sessionId
+    }
 
     /** `api-session/removed(sessionId)`. */
-    data class Removed(val sessionId: String) : SessionDelta
+    data class Removed(override val sessionId: String) : SessionDelta
 
     companion object {
         /**
