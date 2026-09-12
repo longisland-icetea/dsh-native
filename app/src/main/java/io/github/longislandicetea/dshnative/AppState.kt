@@ -754,41 +754,45 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         scope.launch(Dispatchers.IO) {
             created.connected.collect { alive ->
                 _state.update { it.copy(connected = alive) }
-                if (!alive) return@collect
-                openEvents(created)
-                openControl(created)
-                val conversation = _state.value.conversation
-                if (conversation != null) openFollow(conversation.sessionId, conversation.title)
+                // Every socket generation re-reads every mirror. This is the only
+                // place that does it: see `resync`.
+                if (alive) resync()
             }
         }
         scope.launch(Dispatchers.IO) {
             created.log.collect { line -> record(line) }
         }
-        openWorkspaces(created)
-        refreshSessions()
     }
 
+    /**
+     * The policy every long-lived Host stream gets, in one place.
+     *
+     * These streams are the app's mirrors of the Host's state, and each one arrived
+     * with its own copy of this policy -- or, twice, without it. `$events` and the
+     * conversation were fixed first; the control stream and then the workspace
+     * stream were each found dead in the field later, and the workspace one had been
+     * dying *silently*, because `retryWhen` does not see a clean end at all. There is
+     * now one function to use, so "did this stream get the policy?" is answered by
+     * reading one line instead of auditing four collectors.
+     */
+    private fun <T> Flow<T>.asHostStream(name: String): Flow<T> =
+        resubscribe(delayMillis = 2_000) { cause ->
+            record("$name ended: ${cause?.message ?: "stream closed"}; resubscribing")
+        }.catch { error ->
+            record("$name stopped: ${error.message}")
+        }
     /** Subscribe to forwarded Host events so waterfalls can be answered. */
     private fun openEvents(active: DshClient) {
         eventsJob?.cancel()
         eventsJob = scope.launch(Dispatchers.IO) {
             // A mux that is not up yet, or that just dropped, must not kill the
             // process: `callbackFlow` closing with a cause while nothing collects
-            // surfaces as an unhandled exception. Retry until the socket is up.
+            // surfaces as an unhandled exception. Retry until the socket is up --
+            // `asHostStream` keeps trying, and the Host replays a pending
+            // question to whoever is listening when it is asked.
             try {
-            // Resubscribe on any end, completion included. `retryWhen` only sees
-            // failures, and a socket teardown reaching this flow as a plain
-            // completion left nothing subscribed: the banner still said connected
-            // while waterfalls went nowhere, because the Host replays a pending
-            // question only to a client that is listening at that moment. That is
-            // the whole difference between the question appearing and the agent
-            // waiting for an answer nobody can give.
-            val stream: Flow<MuxFrame> = active.events()
-                .resubscribe(delayMillis = 2_000) { cause ->
-                    record("events ended: ${cause?.message ?: "stream closed"}; resubscribing")
-                }
-            stream
-                .catch { error: Throwable -> record("events stopped: ${error.message}") }
+            active.events()
+                .asHostStream("events")
                 .collect { frame: MuxFrame ->
                 when (frame) {
                     is MuxFrame.Item -> {
@@ -909,17 +913,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         workspaceJob = scope.launch(Dispatchers.IO) {
             try {
             active.workspaces()
-                .retryWhen { cause, _ ->
-                    record("workspaces retry: ${cause.message}")
-                    // A retry is not a failure: the archive set may still arrive, and
-                    // the drawer will keep waiting for it.
-                    delay(2_000)
-                    true
-                }
-                .catch { error ->
-                    record("workspaces stopped: ${error.message}")
-                    _state.update { it.copy(workspaceFailed = true) }
-                }
+                .asHostStream("workspaces")
                 .collect { frame ->
                     val value = (frame as? MuxFrame.Item)?.value ?: return@collect
                     val obj = value as? kotlinx.serialization.json.JsonObject ?: return@collect
@@ -1086,6 +1080,57 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     }
 
     /**
+     * Drop the transport, the way a phone in a lift does.
+     *
+     * Exposed for the live harness: "after a reconnect, is every mirror re-read?"
+     * is not observable from outside any other way, and it is exactly where the
+     * session list and the archive set went stale.
+     */
+    internal fun dropTransport(): Boolean = client?.dropSocket() == true
+
+    /**
+     * Re-read the two mirrors that have no per-frame heartbeat.
+     *
+     * The session list and the workspace/archive set change rarely and are read,
+     * not streamed: everything else about them arrives as a delta on a stream
+     * that resubscribes itself. Cheap enough to run on every foreground, which is
+     * what makes a phone that has been asleep for an hour show the truth the
+     * moment it is picked up.
+     */
+    fun refreshLists() {
+        val active = client ?: return
+        refreshSessions()
+        openWorkspaces(active)
+    }
+
+    /**
+     * Bring every mirror of the Host's state back in step.
+     *
+     * The app mirrors five things: the session list, the workspace and archive
+     * set, the control stream (queues, usage, jobs), the forwarded-event stream
+     * (session status, waterfalls), and the open conversation. Each arrived with
+     * its own reconnection, and each was added to some of the places that
+     * re-establish them -- so a socket that came back rebuilt three of the five,
+     * a workspace stream that ended cleanly rebuilt none, and a process that had
+     * been frozen rebuilt nothing until it was killed. Session state and the
+     * archive set went stale this way more than once, in exactly that pattern.
+     *
+     * One function, called from the transport observer, from the foreground, and
+     * from the drawer's Refresh, is the fix: there is no list of mirrors to keep
+     * up to date, because there is one list.
+     */
+    fun resync() {
+        val active = client ?: return
+        record("resync")
+        refreshLists()
+        openControl(active)
+        openEvents(active)
+        _state.value.conversation?.let { conversation ->
+            openFollow(conversation.sessionId, conversation.title)
+        }
+    }
+
+    /**
      * Follow the Host's live control state: queues, projections and jobs.
      *
      * Separate from the events stream because it is a different kind of fact. The
@@ -1097,12 +1142,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private fun openControl(active: DshClient) {
         controlJob?.cancel()
         controlJob = scope.launch(Dispatchers.IO) {
-            val stream: Flow<MuxFrame> = active.control()
-                .resubscribe(delayMillis = 2_000) { cause ->
-                    record("control ended: ${cause?.message ?: "stream closed"}; resubscribing")
-                }
-            stream
-                .catch { error: Throwable -> record("control stopped: ${error.message}") }
+            active.control()
+                .asHostStream("control")
                 .collect { frame: MuxFrame ->
                     if (frame !is MuxFrame.Item) return@collect
                     applyControl(frame.value)
@@ -1515,18 +1556,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         followJob = scope.launch(Dispatchers.IO) {
             try {
             active.follow(sessionId)
-                .resubscribe(delayMillis = 2_000) { cause ->
-                    _state.update { current ->
-                        val live = current.conversation ?: return@update current
-                        current.copy(conversation = live.copy(error = cause?.message))
-                    }
-                }
-                .catch { error ->
-                    _state.update { current ->
-                        val live = current.conversation ?: return@update current
-                        current.copy(conversation = live.copy(error = error.message))
-                    }
-                }
+                .asHostStream("follow")
                 .collect { frame -> reduce(sessionId, title, frame) }
             } catch (error: Throwable) {
                 _state.update { current ->

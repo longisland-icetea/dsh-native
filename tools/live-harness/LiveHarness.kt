@@ -163,8 +163,10 @@ fun main(args: Array<String>): Unit = runBlocking {
         until("the next turn to start", timeoutMs = 60_000) { holder.state.value.conversation?.takeIf { it.running } }
         val dropped = "HARNESS-DROPPED this one is taken away"
         holder.send(dropped)
+        // By text again: the prompt that opened this turn went through the same
+        // inbox and is briefly a `steering` row of its own.
         val pending = until("the steer to be admitted", timeoutMs = 60_000) {
-            holder.state.value.queues[session]?.firstOrNull { it.steering }
+            holder.state.value.queues[session]?.firstOrNull { it.steering && it.label == dropped }
         }
         outsider.updateQueue(session, pending.id, buildJsonObject { put("kind", JsonPrimitive("remove")) })
         val givenUp = until("the row to stop claiming it is on its way", timeoutMs = 60_000) {
@@ -176,6 +178,59 @@ fun main(args: Array<String>): Unit = runBlocking {
             givenUp.failure == TranscriptItem.Pending.DROPPED, givenUp.failure ?: "no reason")
         holder.cancel()
         delay(1_500)
+
+        // ── the Host's own lists stay in step, including across a reconnect ──
+        //
+        // These are the two mirrors that went stale in the field more than once:
+        // the archive set (streamed, and it used to die silently when the stream
+        // ended cleanly) and the session list (read, never re-read after a
+        // transport hiccup). Both are checked the only way that proves anything:
+        // by changing the Host from another client and watching this client find
+        // out.
+        val other = outsider.createSession(null)
+        try {
+            until("the second session to appear in the list", timeoutMs = 60_000) {
+                holder.state.value.sessions.firstOrNull { it.sessionId == other }
+            }
+            // The Host's workspace API is archive-only -- there is no unarchive
+            // to call -- so this checks the one direction that exists. A session
+            // archived on another client must leave this client's list.
+            outsider.archiveSession(other)
+            until("the archive set to reach this client") {
+                holder.state.value.archived.contains(other).takeIf { it }
+            }
+            report.check("a session archived elsewhere leaves the list", true)
+
+            // A lost socket, and a turn the Host starts while this client is not
+            // listening: `api-session/status` is an emit, not a durable event, so
+            // it is never replayed. Only re-reading the list finds it -- which is
+            // the whole point of resyncing on a new socket generation.
+            //
+            // The reconnect is fast enough that the gap cannot be observed
+            // reliably, so the proof of the re-read is the app's own log line,
+            // which only a new generation produces.
+            fun resyncs(): Int = holder.state.value.log.count { it == "resync" }
+            val before = resyncs()
+            report.check("the harness can drop the socket", holder.dropTransport())
+            outsider.prompt(other, "HARNESS-OFFLINE reply with the single word FOUND")
+            until("a new socket generation to re-read the Host", timeoutMs = 60_000) {
+                (holder.state.value.connected && resyncs() > before).takeIf { it }
+            }
+            report.check("a reconnect re-reads every mirror", resyncs() > before)
+            val sawRunning = until("the re-read list to show the turn running", timeoutMs = 60_000) {
+                holder.state.value.sessions.firstOrNull { it.sessionId == other }?.takeIf { it.running }
+            }
+            report.check("a turn it was not listening for is visible afterwards", sawRunning.running)
+            report.check("and the transcript was re-established too",
+                holder.state.value.conversation?.items?.isNotEmpty() == true)
+            // Archived earlier in this run and never unarchived (the Host has no
+            // unarchive), so being in step now means the re-read kept it.
+            report.check("with the archive set still in step",
+                holder.state.value.archived.contains(other))
+        } finally {
+            runCatching { outsider.cancel(other) }
+            runCatching { outsider.archiveSession(other) }
+        }
     } catch (error: Throwable) {
         // A timed-out wait is a failed check, not a reason to lose the report.
         failure = error

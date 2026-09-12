@@ -225,6 +225,17 @@ class DshClient(
         _connected.value = false
     }
 
+    /**
+     * Drop the current socket, the way a phone in a lift does.
+     *
+     * `cancel`, not `close`: a close is a polite goodbye the reader loop treats as
+     * a normal end, while a cancel is the failure a lost network actually looks
+     * like. The mux loop reconnects on its own, which is the path this exists to
+     * exercise -- the live harness uses it to prove that every mirror is re-read
+     * after a reconnect rather than left stale.
+     */
+    internal fun dropSocket(): Boolean = activeSocket?.cancel() != null
+
     /** Suspend until this socket generation ends. */
     private suspend fun runSocket() = suspendCancellableCoroutine<Unit> { cont ->
         val myGeneration = generation

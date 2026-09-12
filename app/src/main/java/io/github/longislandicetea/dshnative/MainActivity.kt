@@ -151,6 +151,16 @@ class MainActivity : ComponentActivity() {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
         val holder = AppStateHolder(lifecycleScope, applicationContext)
+        // Every foreground re-reads the lists the Host does not stream. The phone
+        // spends most of its life asleep with the app still on screen, and a
+        // session archived -- or a turn that finished -- on another client while
+        // it slept is otherwise only visible after a manual Refresh. The streams
+        // look after themselves; these two are read, so they are read again here.
+        lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                holder.refreshLists()
+            }
+        })
         setContent {
             MaterialTheme(colorScheme = scheme) {
                 DshApp(holder, applicationContext)
@@ -638,7 +648,11 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                         holder.openSession(session)
                         scope.launch { drawerState.close() }
                     },
-                    onRefresh = holder::refreshSessions,
+                    // Refresh means "bring this screen in step with the Host", so it
+                    // re-reads everything rather than only the list: a reader who
+                    // taps it is saying the screen looks wrong, and the screen is
+                    // five mirrors, not one.
+                    onRefresh = holder::resync,
                     onToggleGroup = holder::toggleGroup,
                     onArchive = holder::archive,
                     onNewSession = { workspaceId ->
