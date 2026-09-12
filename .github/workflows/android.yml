@@ -105,9 +105,19 @@ jobs:
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+      # The Gradle output is always `app-release.apk`, which says nothing about
+      # which release it is once it is sitting in a download list. The first two
+      # releases were renamed by hand for that reason; this does it for them.
+      # `tools/version.sh` evaluates to the tag's version on a tag build.
+      - name: Name the artifact for the release
+        if: steps.signing.outputs.configured == 'true'
+        run: |
+          eval "$(bash ./tools/version.sh)"
+          cp app/build/outputs/apk/release/app-release.apk \
+             "app/build/outputs/apk/release/dsh-native-${VERSION_NAME}.apk"
       - name: Publish release
         if: steps.signing.outputs.configured == 'true'
         uses: softprops/action-gh-release@v3
         with:
-          files: app/build/outputs/apk/release/app-release.apk
+          files: app/build/outputs/apk/release/dsh-native-*.apk
           generate_release_notes: true
