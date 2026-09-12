@@ -41,6 +41,58 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/**
+ * The logical streams one socket carries, and the rules for ending them.
+ *
+ * Extracted from the socket listener because the rules here decide whether a
+ * stream can ever recover, and getting them wrong is invisible. The bug this
+ * class exists for: a stream's last frame was handed over with `trySend`, whose
+ * failure was ignored, and the stream was then dropped from the table *without
+ * closing its channel*. `trySend` fails when the buffer is full, so under a
+ * burst the `end` frame was discarded, the collector was left waiting on a
+ * channel nothing would ever feed or close, and the socket teardown that should
+ * have released it only closes the channels still in the table -- which this one
+ * was not. The stream was then dead for the life of the app: no queue rows, no
+ * question cards, no error, no retry.
+ */
+internal class MuxStreams {
+    private val table = HashMap<String, Channel<MuxFrame>>()
+
+    fun register(streamId: String, channel: Channel<MuxFrame>) {
+        table[streamId] = channel
+    }
+
+    fun forget(streamId: String) {
+        table.remove(streamId)
+    }
+
+    /**
+     * Hand one frame to its stream.
+     *
+     * An `end` or an `error` is the stream's last frame, so the channel closes
+     * with it: the collector's flow then completes and `resubscribe` re-opens
+     * the stream. Closing keeps whatever is already buffered readable, so the
+     * end frame itself is still delivered.
+     */
+    fun deliver(frame: MuxFrame) {
+        val channel = table[frame.streamId] ?: return
+        channel.trySend(frame)
+        if (frame is MuxFrame.End || frame is MuxFrame.Failure) {
+            table.remove(frame.streamId)
+            channel.close()
+        }
+    }
+
+    /** The socket is gone: end every stream on it, so every collector can retry. */
+    fun closeAll(cause: Throwable?) {
+        table.values.forEach { it.close(cause) }
+        table.clear()
+    }
+
+    /** Streams still registered; a test reads this to prove none is left dangling. */
+    val size: Int get() = table.size
+}
+
 /** Where the harness lives. LAN cleartext only, by design. */
 data class DshEndpoint(val host: String, val port: Int = 3080) {
     val httpBase get() = "http://$host:$port"
@@ -177,12 +229,11 @@ class DshClient(
     private suspend fun runSocket() = suspendCancellableCoroutine<Unit> { cont ->
         val myGeneration = generation
         val request = Request.Builder().url(endpoint.wsUrl).build()
-        val live = HashMap<String, Channel<MuxFrame>>()
+        val live = MuxStreams()
 
         fun finish(cause: Throwable?) {
             synchronized(streamLock) {
-                live.values.forEach { it.close(cause) }
-                live.clear()
+                live.closeAll(cause)
                 if (activeStreams === live) {
                     activeStreams = null
                     activeSocket = null
@@ -213,10 +264,7 @@ class DshClient(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (myGeneration != generation) return
                 val frame = MuxFrames.parse(text) ?: return
-                synchronized(streamLock) {
-                    live[frame.streamId]?.trySend(frame)
-                    if (frame is MuxFrame.End || frame is MuxFrame.Failure) live.remove(frame.streamId)
-                }
+                synchronized(streamLock) { live.deliver(frame) }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -278,7 +326,7 @@ class DshClient(
     private var activeSocket: WebSocket? = null
 
     @Volatile
-    private var activeStreams: HashMap<String, Channel<MuxFrame>>? = null
+    private var activeStreams: MuxStreams? = null
 
     // ── unary ─────────────────────────────────────────────────────────────────
 
@@ -697,14 +745,18 @@ class DshClient(
         // The socket send and the channel pump must not run on the main thread
         // (Android throws NetworkOnMainThreadException on socket I/O).
         val streamId = UUID.randomUUID().toString()
-        val channel = Channel<MuxFrame>(capacity = 128)
+        // Unbounded on purpose: this channel is fed from OkHttp's reader thread,
+        // which must never block, and a frame dropped here is silent data loss
+        // -- a lost `user/message` is a message that never appears, and a lost
+        // `end` is a stream that never ends, so nothing ever retries it.
+        val channel = Channel<MuxFrame>(capacity = Channel.UNLIMITED)
         // Register before sending: otherwise a snapshot that arrives during the
         // send has no channel to land in and the conversation opens empty.
         val paired = synchronized(streamLock) {
             val table = activeStreams
             val socket = activeSocket
             if (table == null || socket == null) null else {
-                table[streamId] = channel
+                table.register(streamId, channel)
                 table to socket
             }
         }
@@ -716,14 +768,18 @@ class DshClient(
 
         val opened = socket.send(openFrame(streamId, endpointName, args))
         if (!opened) {
-            synchronized(streamLock) { table.remove(streamId) }
+            synchronized(streamLock) { table.forget(streamId) }
             close(DshException("mux send failed"))
             return@callbackFlow
         }
 
+        // `send`, not `trySend`: if the collector falls behind, the pump waits
+        // for it instead of dropping the frames it cannot hand over. Dropping
+        // here is how a durable event went missing while the stream looked
+        // healthy.
         val pump = scope.launch(Dispatchers.IO) {
             for (frame in channel) {
-                trySend(frame)
+                send(frame)
                 if (frame is MuxFrame.End || frame is MuxFrame.Failure) break
             }
             close()
@@ -731,7 +787,7 @@ class DshClient(
 
         awaitClose {
             pump.cancel()
-            synchronized(streamLock) { table.remove(streamId) }
+            synchronized(streamLock) { table.forget(streamId) }
             runCatching { socket.send("{\"type\":\"cancel\",\"streamId\":\"$streamId\"}") }
         }
     }

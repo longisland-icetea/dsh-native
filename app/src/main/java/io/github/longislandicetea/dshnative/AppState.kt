@@ -703,10 +703,18 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         scope.launch(Dispatchers.IO) {
             created.connected.collect { alive ->
                 _state.update { it.copy(connected = alive) }
-                // Bounce the conversation stream through every reconnect so the
-                // snapshot lands again instead of leaving a silent gap.
+                // A new socket generation means every logical stream on the old
+                // one is gone, so all three are re-opened here rather than left
+                // to their own retries. The follow stream was already handled
+                // this way; the other two were not, which is why a socket that
+                // came back could still leave the queue dock and the question
+                // cards dead -- the visible half of the app working while the
+                // rest stayed silent.
+                if (!alive) return@collect
+                openEvents(created)
+                openControl(created)
                 val conversation = _state.value.conversation
-                if (alive && conversation != null) openFollow(conversation.sessionId, conversation.title)
+                if (conversation != null) openFollow(conversation.sessionId, conversation.title)
             }
         }
         scope.launch(Dispatchers.IO) {
