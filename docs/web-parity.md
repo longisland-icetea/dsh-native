@@ -34,6 +34,17 @@ Checked, and not gaps:
   new-session button, reconnect and resubscribe.
 - Token usage, context pressure with its breakdown, the pending-message queue
   with steer/edit/remove, and the `/` command menu built from `commands/list`.
+- A sent message is on screen before the Host has read it, the way the web's
+  submission echo works: the composer mints the prompt's `rpcId`, the row is
+  drawn as the reader's own (dimmed, with a line saying whether it is still on
+  its way), the durable message retires it by that identity, and a message the
+  Host discards says so instead of disappearing. The web's version of this is
+  `beginSubmission` / `pendingSubmissions` plus the host-authoritative pending
+  steering bubble; this one reads the discard from the durable inbox mirror
+  instead of from the transient queue frame, which the Host does not always
+  re-send.
+- Live assistant text while a turn streams (`text-delta` chunks into the live
+  bubble, dropped again when the message commits).
 
 ## High impact
 
