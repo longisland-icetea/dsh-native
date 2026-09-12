@@ -624,6 +624,28 @@ private class SessionViewStore(context: android.content.Context) {
 }
 
 /**
+ * Adopt one folded frame into the app state.
+ *
+ * Only assignment: `MutableStateFlow.update` may re-run its lambda when another
+ * writer wins the race, so everything that must happen exactly once -- the fold
+ * itself, which applies deltas to the inbox mirror -- has already happened by
+ * the time this runs. Applying this twice is the same as applying it once, which
+ * is the property the old code lacked.
+ */
+internal fun AppState.withFolded(sessionId: String, folded: TranscriptFold): AppState {
+    val live = conversation ?: return this
+    if (live.sessionId != sessionId) return this
+    return copy(
+        // `running` stays whatever `api-session/status` last said: the fold
+        // carries the value it read, which is older than the flag the composer
+        // is drawn from.
+        conversation = folded.conversation.copy(running = live.running),
+        pendingTurnUsage = folded.pendingTurnUsage,
+        countedUsageSeqs = folded.countedUsageSeqs,
+    )
+}
+
+/**
  * The seq a row key carries, or null when it carries none.
  *
  * Every key ends with the seq: `seq-42` for an event with no turn, `turn:3:42`
@@ -700,16 +722,15 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
         created.start()
 
+        // Every logical stream is opened from here, and only from here, so a new
+        // socket generation always re-opens all three -- including the first.
+        // The follow stream was already handled this way; the other two were
+        // opened once and left to their own retries, which is why a socket that
+        // came back could leave the queue dock and the question cards dead while
+        // the transcript kept working.
         scope.launch(Dispatchers.IO) {
             created.connected.collect { alive ->
                 _state.update { it.copy(connected = alive) }
-                // A new socket generation means every logical stream on the old
-                // one is gone, so all three are re-opened here rather than left
-                // to their own retries. The follow stream was already handled
-                // this way; the other two were not, which is why a socket that
-                // came back could still leave the queue dock and the question
-                // cards dead -- the visible half of the app working while the
-                // rest stayed silent.
                 if (!alive) return@collect
                 openEvents(created)
                 openControl(created)
@@ -720,9 +741,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         scope.launch(Dispatchers.IO) {
             created.log.collect { line -> record(line) }
         }
-        openEvents(created)
         openWorkspaces(created)
-        openControl(created)
         refreshSessions()
     }
 
@@ -1495,29 +1514,39 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
+    /**
+     * Fold one follow frame into the open conversation.
+     *
+     * The fold happens *before* `update`, not inside it: `MutableStateFlow.update`
+     * re-runs its lambda whenever another writer wins the race, and a durable
+     * splice is a delta -- applying one twice corrupts the inbox mirror, which is
+     * what left a discarded steer waiting forever instead of saying so. The
+     * lambda below only assigns what was computed once, so re-running it is
+     * harmless.
+     */
     private fun reduce(sessionId: String, title: String, frame: MuxFrame) {
-        _state.update { current ->
-            val conversation = current.conversation
-            if (conversation == null || conversation.sessionId != sessionId) return@update current
-            when (frame) {
-                is MuxFrame.Item -> {
-                    // The fold itself is pure and lives in TranscriptFold.kt, so a
-                    // captured run of frames can be replayed against the real
-                    // reducer instead of against a copy of it.
-                    val folded = foldFollowFrame(
-                        TranscriptFold(conversation, current.pendingTurnUsage, current.countedUsageSeqs),
-                        FollowCodec.decode(frame.value),
-                    )
-                    current.copy(
-                        conversation = folded.conversation,
-                        pendingTurnUsage = folded.pendingTurnUsage,
-                        countedUsageSeqs = folded.countedUsageSeqs,
-                    )
-                }
-                is MuxFrame.End -> current.copy(conversation = conversation.copy(running = false))
-                is MuxFrame.Failure -> current.copy(
-                    conversation = conversation.copy(error = "${frame.code}: ${frame.message}"),
+        val before = _state.value
+        val conversation = before.conversation ?: return
+        if (conversation.sessionId != sessionId) return
+        when (frame) {
+            is MuxFrame.Item -> {
+                // The fold itself is pure and lives in TranscriptFold.kt, so a
+                // captured run of frames can be replayed against the real reducer
+                // instead of against a copy of it.
+                val folded = foldFollowFrame(
+                    TranscriptFold(conversation, before.pendingTurnUsage, before.countedUsageSeqs),
+                    FollowCodec.decode(frame.value),
                 )
+                _state.update { current -> current.withFolded(sessionId, folded) }
+            }
+            is MuxFrame.End -> _state.update { current ->
+                val live = current.conversation ?: return@update current
+                if (live.sessionId != sessionId) current else current.copy(conversation = live.copy(running = false))
+            }
+            is MuxFrame.Failure -> _state.update { current ->
+                val live = current.conversation ?: return@update current
+                if (live.sessionId != sessionId) current
+                else current.copy(conversation = live.copy(error = "${frame.code}: ${frame.message}"))
             }
         }
     }

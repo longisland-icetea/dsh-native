@@ -45,8 +45,14 @@ internal fun foldFollowFrame(state: TranscriptFold, frame: FollowFrame): Transcr
     val stepped = seeded.apply(spliceOf(frame))
     val delivered = state.deliveredRpcIds + deliveredRpcIds(frame)
     val merged = merge(conversation, frame, usage)
+    // A snapshot replaces the inbox wholesale, so it is also evidence: a row the
+    // Host's inbox no longer lists, with no durable message to show for itself,
+    // has left it for good. Without this the discard was invisible whenever the
+    // splice that reported it was missed -- which is exactly when a snapshot
+    // arrives instead, since that is what a reconnect gets.
+    val settled = settle(merged.items, stepped.inbox, stepped.discarded || frame is FollowFrame.Snapshot, delivered)
     return TranscriptFold(
-        conversation = merged.copy(items = settle(merged.items, stepped.inbox, stepped.discarded, delivered)),
+        conversation = merged.copy(items = settled),
         pendingTurnUsage = usage,
         countedUsageSeqs = counted,
         deliveredRpcIds = delivered,
@@ -139,13 +145,18 @@ internal data class Inbox(
             val source = message["source"] as? JsonObject
             InboxMessage(id, (source?.get("rpcId") as? JsonPrimitive)?.contentOrNull)
         }
+        // A splice that *discarded* pending input says so on the splice itself,
+        // and that fact does not depend on this mirror being able to apply it:
+        // a frame missed while the stream was down leaves the mirror the wrong
+        // shape, and the discard would then be swallowed exactly when it matters
+        // -- the device showed the row waiting forever for this reason.
+        val discarded = removed > 0 && (data["outcome"] as? JsonPrimitive)?.contentOrNull == "canceled"
         // The Host's own bounds check, so a splice this build misreads cannot
         // corrupt the mirror: an out-of-range splice is ignored, not clamped.
         if (start < 0 || start > list.size || start + removed > list.size) {
-            return InboxUpdate(this, discarded = false)
+            return InboxUpdate(this, discarded = discarded)
         }
         val next = list.toMutableList().apply { subList(start, start + removed).clear(); addAll(start, inserted) }
-        val discarded = removed > 0 && (data["outcome"] as? JsonPrimitive)?.contentOrNull == "canceled"
         return InboxUpdate(
             if (target == "next-turn") copy(nextTurn = next) else copy(nextStep = next),
             discarded = discarded,

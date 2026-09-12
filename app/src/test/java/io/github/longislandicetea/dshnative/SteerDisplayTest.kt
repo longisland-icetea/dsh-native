@@ -152,6 +152,53 @@ class SteerDisplayTest {
         assertTrue("a removal the Host canceled is a discard", discarded.discarded)
     }
 
+    /**
+     * A discard survives a mirror that cannot apply the splice.
+     *
+     * The device showed this: a frame missed while the stream was down left the
+     * mirror empty, so the discard splice failed its bounds check and the fact
+     * that the Host had thrown the message away was swallowed -- the row waited
+     * forever. The splice's `outcome` is the fact; applying it is bookkeeping.
+     */
+    @Test
+    fun a_discard_is_believed_even_when_the_mirror_is_out_of_sync() {
+        val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
+        val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "DROPX")
+            .copy(admitted = true)
+        var state = TranscriptFold(
+            // The mirror has lost track: it is empty while the row is admitted.
+            Conversation(sessionId = "s", items = listOf(echo)),
+        )
+        state = foldFollowFrame(
+            state,
+            FollowFrame.Event(splice(seq = 19, start = 0, removed = 1, outcome = "canceled")),
+        )
+        assertEquals(TranscriptItem.Pending.DROPPED, echoes(state).single().failure)
+    }
+
+    /**
+     * Adopting a folded frame is idempotent, because the fold is not.
+     *
+     * `MutableStateFlow.update` re-runs its lambda when another writer wins the
+     * race -- five times, in one device log -- and a splice is a delta, so a
+     * frame folded twice left the inbox mirror holding a message the Host had
+     * already dropped. The fold therefore happens before the update and this is
+     * all the lambda does.
+     */
+    @Test
+    fun adopting_a_folded_frame_twice_is_the_same_as_once() {
+        val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
+        val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "DROPX")
+        var fold = TranscriptFold(Conversation(sessionId = "s", items = listOf(echo)))
+        fold = foldFollowFrame(fold, FollowFrame.Event(splice(seq = 18, start = 0, inserted = listOf("m1"))))
+        val state = AppState(conversation = Conversation(sessionId = "s", items = listOf(echo)))
+
+        val once = state.withFolded("s", fold)
+        val twice = once.withFolded("s", fold)
+        assertEquals(once, twice)
+        assertEquals("the mirror holds the message exactly once", 1, state.withFolded("s", fold).conversation!!.items.size)
+    }
+
     /** An unreadable splice is ignored rather than corrupting the mirror. */
     @Test
     fun an_out_of_range_splice_changes_nothing() {
@@ -177,6 +224,51 @@ class SteerDisplayTest {
     fun an_echo_is_retired_by_the_prompt_identity_the_host_echoes_back() {
         assertTrue(replay(delivered).deliveredRpcIds.contains(rpcId(delivered)))
         assertFalse(replay(removed).deliveredRpcIds.contains(rpcId(removed)))
+    }
+
+    /**
+     * A discard this client never saw reported is still a discard.
+     *
+     * The splice that says so is a frame like any other: if the stream was
+     * reconnecting, the snapshot that arrives instead says only what the inbox
+     * *is*, not how it emptied. A row the fresh inbox does not hold, with no
+     * durable message behind it, has to be given up on -- otherwise it waits
+     * forever, which is the state the device showed.
+     */
+    @Test
+    fun a_snapshot_that_no_longer_lists_the_row_gives_up_on_it() {
+        val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
+        val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "STEERDROP")
+            .copy(admitted = true)
+        var state = TranscriptFold(Conversation(sessionId = "s", items = listOf(echo)))
+
+        val snapshot = FollowFrame.Snapshot(
+            cursor = 90,
+            records = emptyList(),
+            hasMore = false,
+            inbox = InboxProjection(nextTurn = emptyList(), nextStep = emptyList()),
+        )
+        state = foldFollowFrame(state, snapshot)
+        assertEquals(TranscriptItem.Pending.DROPPED, echoes(state).single().failure)
+    }
+
+    /** A snapshot that still lists it leaves the row waiting. */
+    @Test
+    fun a_snapshot_that_still_lists_the_row_leaves_it_waiting() {
+        val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
+        val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "STEERDROP")
+        var state = TranscriptFold(Conversation(sessionId = "s", items = listOf(echo)))
+
+        val snapshot = FollowFrame.Snapshot(
+            cursor = 90,
+            records = emptyList(),
+            hasMore = false,
+            inbox = InboxProjection(nextStep = listOf(InboxMessage("m1", rpcId))),
+        )
+        state = foldFollowFrame(state, snapshot)
+        val row = echoes(state).single()
+        assertTrue("still on its way", row.waiting)
+        assertTrue("and the inbox said so", row.admitted)
     }
 
     /** A row the app has no record of admitting is left alone by a discard. */
