@@ -25,6 +25,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.contentOrNull
+import java.util.UUID
 import android.util.Log
 
 /**
@@ -34,8 +35,9 @@ import android.util.Log
  * answer is the listener's return value, sent back through `$events/result`.
  * Until it is answered the agent stays blocked, so these are the only items the
  * UI must never let a user miss.
+ *
+ * One question in a user-questions request.
  */
-/** One question in a user-questions request. */
 @Serializable
 data class QuestionItem(
     val id: String,
@@ -157,7 +159,6 @@ internal fun <T> Flow<T>.resubscribe(
 /** A stream that finished cleanly, so [resubscribe] can retry it. */
 internal class UpstreamEnded : RuntimeException("stream closed")
 
-/** One row in the transcript. */
 /**
  * The unread set after one running-state change.
  *
@@ -197,6 +198,41 @@ sealed interface TranscriptItem {
     val key: String
 
     data class User(override val key: String, val text: String) : TranscriptItem
+
+    /**
+     * A message this client sent that the Host has not logged yet.
+     *
+     * The web client paints a submission the moment it is sent and keeps
+     * painting it until durable material with the same prompt identity appears.
+     * This client painted nothing: a steer lived only in the queue dock until
+     * the Host folded it into a turn -- minutes, on a long tool call -- and if
+     * the Host let the message go it never appeared anywhere at all, which is
+     * exactly what "the steered message vanished" looked like.
+     *
+     * [rpcId] is the identity the Host echoes back on both the prompt's
+     * `source.rpcId` and its inbox row, so the echo can be retired by the
+     * message it becomes rather than by a timer.
+     */
+    data class Pending(
+        override val key: String,
+        val rpcId: String,
+        val text: String,
+        /** The Host's inbox has listed it: proof the prompt was admitted. */
+        val admitted: Boolean = false,
+        /** Set once the send is over and did not land, with the reason. */
+        val failure: String? = null,
+    ) : TranscriptItem {
+        /** Whether there is still a chance this message reaches the agent. */
+        val waiting: Boolean get() = failure == null
+
+        companion object {
+            fun keyOf(rpcId: String) = "pending:$rpcId"
+
+            /** What a message the Host let go says for itself. */
+            const val DROPPED = "not delivered — it left the queue before a turn read it"
+        }
+    }
+
     data class Assistant(override val key: String, val text: String, val streaming: Boolean) : TranscriptItem
     data class Activity(override val key: String, val label: String, val detail: String?) : TranscriptItem
 
@@ -226,13 +262,6 @@ sealed interface TranscriptItem {
         fun callIdOrNull(): String? = callId
     }
 
-    /** A result waiting to be folded into its call. */
-    /**
-     * A harness notice, shown as a card in the tool-call style.
-     *
-     * Background jobs arrive as plugin-sourced user messages; rendering them as
-     * chat text made the harness look like the human.
-     */
     /**
      * One turn's cost, placed after the turn it describes.
      *
@@ -247,6 +276,12 @@ sealed interface TranscriptItem {
         val turn: Int,
     ) : TranscriptItem
 
+    /**
+     * A harness notice, shown as a card in the tool-call style.
+     *
+     * Background jobs arrive as plugin-sourced user messages; rendering them as
+     * chat text made the harness look like the human.
+     */
     data class Notice(
         override val key: String,
         val label: String,
@@ -436,7 +471,6 @@ data class AppState(
     val connected: Boolean = false,
     val sessions: List<SessionSummary> = emptyList(),
     val conversation: Conversation? = null,
-    val busy: Boolean = false,
     val log: List<String> = emptyList(),
     /** Last session-list failure, surfaced in the drawer. */
     val sessionsError: String? = null,
@@ -759,46 +793,6 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * `status` and `activity` are one field each and are patched in place, which is
      * what keeps the list live without a `session/list` round trip per event.
      */
-    /**
-     * Add one assistant message's usage to its turn.
-     *
-     * A turn has several steps, each with its own usage, so the turn's cost is
-     * their sum. The Host's session totals cannot answer "which turn was
-     * expensive", which is the question a reader actually has.
-     */
-    /**
-     * Add one assistant message's usage to the turn it belongs to.
-     *
-     * Returns the accumulated map and the seq guard together, so the caller can
-     * keep both in state without this reading or writing any.
-     */
-    private fun accumulateTurnUsage(
-        frame: FollowFrame,
-        current: Map<Int, TokenUsage>,
-        counted: Set<Long>,
-    ): Pair<Map<Int, TokenUsage>, Set<Long>> {
-        val unchanged = current to counted
-        val event = (frame as? FollowFrame.Event)?.event ?: return unchanged
-        if (event.type != "assistant/message") return unchanged
-        // One event contributes once, however many times a reconnect replays it.
-        if (event.seq in counted) return unchanged
-        val data = event.data as? JsonObject ?: return unchanged
-        val turn = (data["turn"] as? JsonPrimitive)?.intOrNull ?: return unchanged
-        val usage = data["usage"] ?: return unchanged
-        val fresh = runCatching {
-            DshWire.json.decodeFromJsonElement(TokenUsage.serializer(), usage)
-        }.getOrNull() ?: return unchanged
-        val previous = current[turn] ?: TokenUsage()
-        val sum = TokenUsage(
-            uncachedInputTokens = previous.uncachedInputTokens + fresh.uncachedInputTokens,
-            outputTokens = previous.outputTokens + fresh.outputTokens,
-            cacheReadTokens = previous.cacheReadTokens + fresh.cacheReadTokens,
-            cacheWriteTokens = previous.cacheWriteTokens + fresh.cacheWriteTokens,
-            reasoningTokens = previous.reasoningTokens + fresh.reasoningTokens,
-        )
-        return (current + (turn to sum)) to (counted + event.seq)
-    }
-
     private fun applySessionDelta(active: DshClient, event: String, args: List<JsonElement>) {
         when (val delta = SessionDelta.from(event, args)) {
             is SessionDelta.Running -> _state.update { current ->
@@ -1140,14 +1134,54 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
 
     /** Queue a message for the next turn: what the composer does while busy. */
     fun enqueue(text: String) {
+        if (text.isBlank()) return
+        send(text, mode = "queue")
+    }
+
+    /**
+     * Send one message, showing it before the Host has it.
+     *
+     * The row this adds is retired by the durable message it becomes (matched on
+     * the prompt identity the Host echoes back), so the swap is a replacement
+     * rather than a second copy -- and if the send never lands, the row is still
+     * there saying so. Sending used to leave nothing on screen until a turn read
+     * it, which on a long tool call is minutes and, if the Host dropped it, is
+     * never.
+     */
+    fun send(text: String, mode: String = "steer") {
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
         if (text.isBlank()) return
+        val rpcId = UUID.randomUUID().toString()
+        val echo = TranscriptItem.Pending(
+            key = TranscriptItem.Pending.keyOf(rpcId),
+            rpcId = rpcId,
+            text = text,
+        )
+        _state.update { current ->
+            val live = current.conversation ?: return@update current
+            current.copy(conversation = live.copy(items = live.items + echo))
+        }
         scope.launch(Dispatchers.IO) {
-            runCatching { active.prompt(conversation.sessionId, text, mode = "queue") }
-                .onSuccess { record("queued") }
+            runCatching { active.prompt(conversation.sessionId, text, mode, rpcId) }
+                .onSuccess { record(if (mode == "queue") "queued" else "sent") }
                 .onFailure { error ->
-                    _state.update { it.copy(queueError = "Queue failed: ${error.message}") }
+                    record("prompt failed: ${error.message}")
+                    _state.update { current ->
+                        val live = current.conversation ?: return@update current
+                        current.copy(
+                            conversation = live.copy(
+                                items = live.items.map { row ->
+                                    if (row.key == echo.key) {
+                                        (row as TranscriptItem.Pending).copy(failure = "not sent: ${error.message}")
+                                    } else {
+                                        row
+                                    }
+                                },
+                            ),
+                            queueError = if (mode == "queue") "Queue failed: ${error.message}" else current.queueError,
+                        )
+                    }
                 }
         }
     }
@@ -1160,7 +1194,23 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             runCatching { active.updateQueue(sessionId, item.id, action) }
                 .onSuccess {
                     record("queue $what: ${item.id.take(8)}")
-                    _state.update { it.copy(queueError = null, editingQueued = null) }
+                    _state.update { current ->
+                        val live = current.conversation ?: return@update current
+                        current.copy(
+                            queueError = null,
+                            editingQueued = null,
+                            // Removing a message is the reader withdrawing it, so
+                            // its row goes too: an echo left behind would claim a
+                            // message the reader has just deleted is still coming.
+                            conversation = if (action["kind"]?.jsonPrimitive?.contentOrNull == "remove") {
+                                live.copy(items = live.items.filterNot { row ->
+                                    row is TranscriptItem.Pending && row.rpcId == item.rpcId
+                                })
+                            } else {
+                                live
+                            },
+                        )
+                    }
                 }
                 .onFailure { error ->
                     // The web client's copy for this is worth matching: the row may
@@ -1443,19 +1493,17 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             if (conversation == null || conversation.sessionId != sessionId) return@update current
             when (frame) {
                 is MuxFrame.Item -> {
-                    val decoded = FollowCodec.decode(frame.value)
-                    // Decoded once and handed to both: a reconnect replays the
-                    // same assistant messages, and accumulating them twice would
-                    // inflate every turn's cost.
-                    val (usage, counted) = accumulateTurnUsage(
-                        decoded,
-                        current.pendingTurnUsage,
-                        current.countedUsageSeqs,
+                    // The fold itself is pure and lives in TranscriptFold.kt, so a
+                    // captured run of frames can be replayed against the real
+                    // reducer instead of against a copy of it.
+                    val folded = foldFollowFrame(
+                        TranscriptFold(conversation, current.pendingTurnUsage, current.countedUsageSeqs),
+                        FollowCodec.decode(frame.value),
                     )
                     current.copy(
-                        conversation = merge(conversation, decoded, usage),
-                        pendingTurnUsage = usage,
-                        countedUsageSeqs = counted,
+                        conversation = folded.conversation,
+                        pendingTurnUsage = folded.pendingTurnUsage,
+                        countedUsageSeqs = folded.countedUsageSeqs,
                     )
                 }
                 is MuxFrame.End -> current.copy(conversation = conversation.copy(running = false))
@@ -1466,144 +1514,13 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
-    private fun merge(
-        conversation: Conversation,
-        frame: FollowFrame,
-        pendingTurnUsage: Map<Int, TokenUsage> = emptyMap(),
-    ): Conversation = when (frame) {
-        is FollowFrame.Snapshot -> {
-            // The snapshot is the newest window, not a delta: rebuild by seq so a
-            // reconnect cannot duplicate or reorder what is already on screen.
-            val merged = pairToolResults(
-                (conversation.items + usageAwareItems(frame.records, conversation.workspaceRoot))
-                    .associateBy { it.key }
-                    .values
-                    .sortedBy(::seqOf),
-            )
-            conversation.copy(
-                title = conversation.title.ifEmpty { conversation.sessionId.takeLast(8) },
-                items = merged,
-                lastSeq = maxOf(conversation.lastSeq, frame.records.maxOfOrNull { it.seq } ?: 0L),
-                throughSeq = frame.cursor,
-                hasMore = frame.hasMore,
-                error = null,
-                liveText = "",
-            )
-        }
-
-        is FollowFrame.Event -> {
-            val event = frame.event
-            val turn = (event.data as? JsonObject)?.get("turn")?.jsonPrimitive?.intOrNull
-            // The turn's usage accumulated as its assistant messages arrived;
-            // `turn/end` is where it becomes a row of its own. The reducer knows
-            // both facts, which a renderer reading keys at draw time did not.
-            val closed = if (event.type == "turn/end" && turn != null) {
-                pendingTurnUsage[turn]?.let { used ->
-                    TranscriptItem.Usage(key = "usage:$turn:${event.seq}", usage = used, turn = turn)
-                }
-            } else {
-                null
-            }
-            conversation.copy(
-            items = pairToolResults(
-                (conversation.items + listOfNotNull(toItem(event, conversation.workspaceRoot)) + listOfNotNull(closed))
-                    .distinctBy { it.key },
-            ),
-            lastSeq = maxOf(conversation.lastSeq, event.seq),
-            // Deliberately not derived from the event type. The Host reports
-            // whether a turn is running on `api-session/status`, and an inferred
-            // flag disagrees with it whenever a turn ends with a row that still
-            // says "running" -- which is what left the composer showing Stop after
-            // the turn was over. `api-session/status` is authoritative; this keeps
-            // whatever it last said.
-            running = conversation.running,
-            )
-        }
-
-        is FollowFrame.AssistantChunk -> {
-            val delta = frame.text ?: return conversation
-            conversation.copy(liveText = conversation.liveText + delta)
-        }
-
-        FollowFrame.Unknown -> conversation
-    }
-
-    /** A row that carries no seq sorts last rather than throwing. */
-    private fun seqOf(item: TranscriptItem): Long = seqOfKey(item.key) ?: Long.MAX_VALUE
-
-    /**
-     * Map one durable event to a transcript row, or to null when the event is
-     * machinery the reader does not need ([docs/event-coverage.md] has the full
-     * table and the reason for each choice).
-     */
-    /**
-     * Map one durable event to a transcript row.
-     *
-     * Needs no instance state: everything it reads is on the event, which is why
-     * the builder above can share it.
-     */
-    /**
-     * Map a run of events to rows, including the per-turn usage rows.
-     *
-     * The usage row depends on a turn's assistant messages, which precede the
-     * `turn/end` that closes the turn, so it cannot be produced one event at a
-     * time without carrying a running total. A snapshot -- replayed on
-     * reconnect, and on opening any session at all -- is the common case, so
-     * this walks the run once and appends each turn's row at its end. The live
-     * path produces the same row from the state it is already keeping.
-     *
-     * Pure and reachable from tests: the replayed shape of a history is worth
-     * pinning without a Host.
-     */
-
-
-    /**
-     * Fold every `tool/result` row into the `tool/call` row it answers.
-     *
-     * Pairing is done over the whole window rather than as events arrive,
-     * because paging and reconnects can deliver the halves in either order and
-     * the reducer itself must stay free of side effects. A result with no
-     * matching call in this window keeps its own row instead of disappearing.
-     */
-    private fun pairToolResults(items: List<TranscriptItem>): List<TranscriptItem> {
-        val results = items.filterIsInstance<TranscriptItem.ToolResultRow>()
-        if (results.isEmpty()) return items
-        val byCallId = results.mapNotNull { row -> row.toolCallId?.let { it to row } }.toMap()
-        if (byCallId.isEmpty()) return items
-        // Calls consume their result in order, so a repeated callId across turns
-        // still pairs with the nearest unconsumed call.
-        val consumed = mutableSetOf<String>()
-        return items.mapNotNull { item ->
-            when {
-                item is TranscriptItem.ToolCall -> {
-                    val row = byCallId[item.callIdOrNull()]?.takeIf { it.key !in consumed }
-                    if (row == null) {
-                        item
-                    } else {
-                        consumed += row.key
-                        item.copy(
-                            result = row.text,
-                            status = if (row.failed) TranscriptItem.ToolCall.Status.FAILED
-                            else TranscriptItem.ToolCall.Status.DONE,
-                        )
-                    }
-                }
-                // Every result row is dropped: a paired one has been folded into
-                // its call, and an unpaired one (paging landed mid-pair) would
-                // otherwise surface as a bare result line.
-                item is TranscriptItem.ToolResultRow -> null
-                else -> item
-            }
-        }
-    }
-
     /** Load one older page and prepend it, keeping seq order and the paging cursor. */
     fun loadOlder() {
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
         if (!conversation.hasMore || conversation.items.isEmpty()) return
         scope.launch(Dispatchers.IO) {
-            val oldest = conversation.items.minOfOrNull(::seqOf) ?: return@launch
+            val oldest = conversation.items.minOfOrNull(::sequenceOf) ?: return@launch
             if (oldest == Long.MAX_VALUE) return@launch
             runCatching {
                 active.pageOlder(
@@ -1618,7 +1535,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                         (live.items + events.mapNotNull { toItem(it, live.workspaceRoot) })
                             .associateBy { it.key }
                             .values
-                            .sortedBy(::seqOf),
+                            .sortedBy(::sequenceOf),
                     )
                     // throughSeq stays the newest bound; hasMore now describes
                     // whether another newer-than-`oldest` page exists behind us.
@@ -1628,22 +1545,6 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
-    fun send(text: String) {
-        val active = client ?: return
-        val conversation = _state.value.conversation ?: return
-        if (text.isBlank()) return
-        scope.launch(Dispatchers.IO) {
-            _state.update { it.copy(busy = true) }
-            runCatching { active.prompt(conversation.sessionId, text) }
-                .onFailure { error ->
-                    _state.update { current ->
-                        val live = current.conversation ?: return@update current
-                        current.copy(conversation = live.copy(error = "prompt failed: ${error.message}"))
-                    }
-                }
-            _state.update { it.copy(busy = false) }
-        }
-    }
 
     fun cancel() {
         val active = client ?: return

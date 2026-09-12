@@ -361,18 +361,34 @@ class DshClient(
      * (a correction should land while the agent is still working) and the queue
      * dock's re-send queues, so the choice belongs to the caller.
      */
-    suspend fun prompt(sessionId: String, text: String, mode: String = "steer") {
-        promptContent(sessionId, listOf(PromptContent("text", text)), mode)
+    suspend fun prompt(
+        sessionId: String,
+        text: String,
+        mode: String = "steer",
+        /**
+         * The prompt's identity. The caller may mint it so it can recognise its
+         * own message in the Host's queue and log -- the Host echoes this value
+         * on `source.rpcId` and on the pending inbox row -- and a reconnect
+         * that replays the prompt's effects still matches what it sent.
+         */
+        requestId: String = UUID.randomUUID().toString(),
+    ) {
+        promptContent(sessionId, listOf(PromptContent("text", text)), mode, requestId)
     }
 
-    suspend fun promptContent(sessionId: String, content: List<PromptContent>, mode: String = "steer") {
+    suspend fun promptContent(
+        sessionId: String,
+        content: List<PromptContent>,
+        mode: String = "steer",
+        requestId: String = UUID.randomUUID().toString(),
+    ) {
         val args = buildJsonObject {
             put(
                 "request",
                 json.encodeToJsonElement(
                     PromptRequest.serializer(),
                     PromptRequest(
-                        requestId = UUID.randomUUID().toString(),
+                        requestId = requestId,
                         sessionId = sessionId,
                         mode = mode,
                         content = content,

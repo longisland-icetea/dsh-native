@@ -550,6 +550,13 @@ sealed interface FollowFrame {
         val cursor: Long,
         val records: List<SessionEvent>,
         val hasMore: Boolean,
+        /**
+         * What the agent has not read yet, straight from the projection bag.
+         *
+         * A snapshot is the only frame that carries the whole inbox, so it is
+         * what seeds the mirror the durable splices then maintain.
+         */
+        val inbox: InboxProjection? = null,
     ) : FollowFrame
 
     data class Event(val event: SessionEvent) : FollowFrame
@@ -568,6 +575,7 @@ object FollowCodec {
                 cursor = obj["cursor"]?.jsonPrimitive?.longOrNull ?: 0L,
                 records = obj["records"]?.jsonArray?.mapNotNull(::eventOf).orEmpty(),
                 hasMore = obj["hasMore"]?.jsonPrimitive?.booleanOrNull ?: false,
+                inbox = inboxOf(obj["projections"]),
             )
             "event" -> eventOf(obj["event"])?.let(FollowFrame::Event) ?: FollowFrame.Unknown
             "assistant-stream" -> decodeChunk(obj["frame"]) ?: FollowFrame.Unknown
@@ -586,6 +594,31 @@ object FollowCodec {
         )
     }
 
+    /**
+     * The `inbox` projection inside a snapshot's projection bag.
+     *
+     * Decoded by hand rather than through the strict serializer: this is a
+     * message list whose blocks this build does not model, and a shape it cannot
+     * read must yield "no inbox" instead of failing the whole snapshot -- which
+     * is what a strict decode of an unknown block did to the session list once.
+     */
+    private fun inboxOf(projections: JsonElement?): InboxProjection? {
+        val bag = (projections as? JsonObject)?.get("values") as? JsonObject ?: return null
+        val inbox = bag["inbox"] as? JsonObject ?: return null
+        return InboxProjection(
+            nextTurn = inbox["next-turn"].toInboxMessages(),
+            nextStep = inbox["next-step"].toInboxMessages(),
+        )
+    }
+
+    private fun JsonElement?.toInboxMessages(): List<InboxMessage> =
+        (this as? JsonArray).orEmpty().mapNotNull { element ->
+            val message = element as? JsonObject ?: return@mapNotNull null
+            val id = (message["id"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            val source = message["source"] as? JsonObject
+            InboxMessage(id, (source?.get("rpcId") as? JsonPrimitive)?.contentOrNull)
+        }
+
     private fun eventOf(element: JsonElement?): SessionEvent? {
         val obj = element as? JsonObject ?: return null
         val event = (obj["event"] as? JsonObject) ?: obj
@@ -598,6 +631,20 @@ object FollowCodec {
         )
     }
 }
+
+/**
+ * The `inbox` projection: input the agent has been given but has not read.
+ *
+ * `next-turn` waits for a turn of its own, `next-step` is folded into the next
+ * step of the running one -- which is where a steer goes.
+ */
+data class InboxProjection(
+    val nextTurn: List<InboxMessage> = emptyList(),
+    val nextStep: List<InboxMessage> = emptyList(),
+)
+
+/** One pending message, by the two identities a reply can be matched on. */
+data class InboxMessage(val id: String, val rpcId: String?)
 
 /** One content block inside a message. Only `text` is rendered as prose. */
 @Serializable

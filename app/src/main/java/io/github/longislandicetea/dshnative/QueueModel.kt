@@ -21,6 +21,14 @@ import kotlinx.serialization.json.put
 @Serializable
 data class QueuedItem(
     val id: String,
+    /**
+     * The prompt identity the Host echoed back, when it has one.
+     *
+     * It is what lets this client recognise its *own* message in the Host's
+     * queue -- the id is the Host's, minted on admission, while the rpcId is
+     * what this client sent and what the durable message will carry.
+     */
+    val rpcId: String? = null,
     /** `queued` waits its turn; `steering` is being folded into the running turn. */
     val placement: String = "queued",
     val preview: String = "",
@@ -83,6 +91,7 @@ object QueueCodec {
         }?.joinToString("\n")?.ifBlank { null }
         QueuedItem(
             id = id,
+            rpcId = (obj["rpcId"] as? JsonPrimitive)?.contentOrNull,
             placement = obj["placement"]?.jsonPrimitive?.contentOrNull ?: "queued",
             preview = (obj["preview"] as? JsonPrimitive)?.contentOrNull
                 ?: obj["previewText"]?.jsonPrimitive?.contentOrNull

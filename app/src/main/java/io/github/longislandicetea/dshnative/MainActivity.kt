@@ -1768,6 +1768,7 @@ private fun TranscriptRow(
 ) {
     when (item) {
         is TranscriptItem.User -> UserBubble(item.text)
+        is TranscriptItem.Pending -> PendingBubble(item)
         is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming)
         is TranscriptItem.ToolCall -> ToolCard(item)
         is TranscriptItem.Activity -> ActivityRow(item.label, item.detail)
@@ -2085,6 +2086,39 @@ private fun UserBubble(text: String) {
             SelectionContainer {
                 Text(text, fontSize = 14.sp, modifier = Modifier.padding(12.dp))
             }
+        }
+    }
+}
+
+/**
+ * A message this client sent that the Host has not logged yet.
+ *
+ * Deliberately the reader's own bubble, in the reader's own place, dimmed rather
+ * than hidden. A message you sent being invisible is the whole bug this row
+ * exists for: it used to live only in the queue dock -- out of the conversation,
+ * under a Remove button -- until a turn read it, which on a long tool call is
+ * minutes and, if the Host let it go, is never. The line under it says which of
+ * those it is.
+ */
+@Composable
+private fun PendingBubble(item: TranscriptItem.Pending) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Column(
+            modifier = Modifier.fillMaxWidth(0.88f),
+            horizontalAlignment = Alignment.End,
+        ) {
+            Surface(color = BUBBLE_USER.copy(alpha = 0.55f), shape = RoundedCornerShape(12.dp)) {
+                SelectionContainer {
+                    Text(item.text, fontSize = 14.sp, modifier = Modifier.padding(12.dp))
+                }
+            }
+            Text(
+                text = item.failure
+                    ?: if (item.admitted) "waiting for the agent to read it" else "sending…",
+                color = if (item.failure != null) WARN else MUTED,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(top = 3.dp, end = 2.dp),
+            )
         }
     }
 }
