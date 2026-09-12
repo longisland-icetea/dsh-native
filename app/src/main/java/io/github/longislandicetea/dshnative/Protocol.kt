@@ -921,18 +921,27 @@ object EventPayload {
     /**
      * Visible text of one live assistant chunk.
      *
-     * A streamed delta uses the same block shape as a finished message, so the
-     * `type == "text"` filter matters most here: a reasoning delta appended to
-     * the live bubble would be indistinguishable from the answer while it
-     * streams. A bare string chunk is accepted as-is because some frames carry
-     * plain concatenated text.
+     * The shape is the wire's, measured: a streamed token is
+     * `{"type":"text-delta","index":1,"text":"D"}`, and the thinking that
+     * precedes it is the same with `reasoning-delta`. The first version here
+     * accepted only `type == "text"` -- a kind the Host never sends -- so every
+     * delta was dropped and the live bubble it feeds never held a character.
+     *
+     * A reasoning delta is still dropped deliberately: chain of thought in the
+     * live bubble would be indistinguishable from the answer while it streams.
+     * A bare string chunk is accepted as-is because some frames carry plain
+     * concatenated text, and a finished block is accepted because a frame that
+     * carries one is a message rather than a delta.
      */
     fun chunkText(chunk: JsonElement?): String? {
         (chunk as? JsonPrimitive)?.takeIf { it.isString }?.let { return it.content }
         val obj = chunk as? JsonObject ?: return null
-        (obj["type"] as? JsonPrimitive)?.contentOrNull?.let { kind ->
-            if (kind != "text") return null
+        val kind = (obj["type"] as? JsonPrimitive)?.contentOrNull
+        when (kind) {
+            "text-delta" -> return (obj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            "reasoning-delta", "reasoning" -> return null
         }
+        if (kind != null && kind != "text") return null
         val joined = blocksOf(obj).filter { it.type == "text" }.mapNotNull { it.text }.joinToString("")
         if (joined.isNotEmpty()) return joined
         return (obj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content

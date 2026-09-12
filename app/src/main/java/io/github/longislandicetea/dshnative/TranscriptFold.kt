@@ -194,6 +194,11 @@ private fun merge(
             null
         }
         conversation.copy(
+            // The deltas this attempt streamed are the message that just
+            // committed, so the live bubble has to let go of them: it is the
+            // same text, and keeping it would show every reply twice -- once
+            // where it belongs and once stuck at the bottom.
+            liveText = if (event.type == "assistant/message") "" else conversation.liveText,
             // A message this client sent has no seq, so it would sink above
             // whatever the turn logs next. It belongs where the reader is
             // looking -- under their thumb, at the bottom -- until the message
