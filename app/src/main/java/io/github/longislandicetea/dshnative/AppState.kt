@@ -172,6 +172,16 @@ data class PendingInteraction(
  * fix does nothing at all for a clean end.
  */
 /**
+ * How long a request may take before the row stops claiming it is going fine.
+ *
+ * A LAN answers in milliseconds; a second is already unusual. Three is where a
+ * reader starts wondering, and saying "slow" then is honest in a way that
+ * "sending…" is not.
+ */
+private const val SLOW_REQUEST_MS = 3_000L
+
+
+/**
  * How long to wait for the Host's replay of unanswered waterfalls.
  *
  * They arrive in one batch straight after `ready`, so this only has to cover a
@@ -262,6 +272,14 @@ sealed interface TranscriptItem {
          * starts after it cannot tell the two apart.
          */
         val admittedSeq: Long? = null,
+        /**
+         * Something worth saying while the send is still being tried.
+         *
+         * Not a failure: a message on a weak link is retried rather than given
+         * up on, and "sending…" alone cannot be told from a client that has
+         * quietly stopped.
+         */
+        val note: String? = null,
         /** Set once the send is over and did not land, with the reason. */
         val failure: String? = null,
     ) : TranscriptItem {
@@ -597,6 +615,14 @@ data class AppState(
      * live on its row.
      */
     /**
+     * Messages this client has taken responsibility for delivering.
+     *
+     * Persisted, and the reason a send is no longer a single attempt: see
+     * [OutboxEntry]. A row in the transcript is this entry *shown*; the entry
+     * itself is what survives a failed attempt and an app the system killed.
+     */
+    val outbox: List<OutboxEntry> = emptyList(),
+    /**
      * The fold's own memory for the open conversation.
      *
      * It has to live here, not in the loop that folds: the inbox mirror is a
@@ -689,11 +715,13 @@ private class SessionViewStore(context: android.content.Context) {
     fun showArchived(): Boolean = prefs.getBoolean("showArchived", false)
     fun showLog(): Boolean = prefs.getBoolean("showLog", false)
     fun unread(): Set<String> = prefs.getStringSet("unread", emptySet()) ?: emptySet()
+    fun outbox(): String? = prefs.getString("outbox", null)
 
     fun saveCollapsed(value: Set<String>) = prefs.edit().putStringSet("collapsed", value).apply()
     fun saveShowArchived(value: Boolean) = prefs.edit().putBoolean("showArchived", value).apply()
     fun saveShowLog(value: Boolean) = prefs.edit().putBoolean("showLog", value).apply()
     fun saveUnread(value: Set<String>) = prefs.edit().putStringSet("unread", value).apply()
+    fun saveOutbox(value: String) = prefs.edit().putString("outbox", value).apply()
 }
 
 /**
@@ -830,6 +858,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // closed is still something the reader has not seen, and the Host does
             // not track read state for us.
             unread = viewStore?.unread() ?: emptySet(),
+            // Unsent messages outlive the process: a phone in a pocket gets its
+            // app killed, and words the reader typed should not go with it.
+            outbox = OutboxCodec.decode(viewStore?.outbox()),
         ),
     )
     val state: StateFlow<AppState> = _state.asStateFlow()
@@ -859,6 +890,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var controlJob: Job? = null
     /** Bound by the `$events` ready frame; every answer must name it. */
     private var eventClientId: String? = null
+    /** The outbox worker, if it is running. */
+    private var outboxJob: Job? = null
     /** When the session list was last re-read because a delta named a stranger. */
     private var lastListRereadAt = 0L
     /** Waterfall ids the Host handed back since the last `ready`. */
@@ -917,7 +950,10 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         resubscribe(delayMillis = 2_000) { cause ->
             record("$name ended: ${cause?.message ?: "stream closed"}; resubscribing")
         }.catch { error ->
-            record("$name stopped: ${error.message}")
+            // Re-opening a stream cancels the old one, and a cancellation is this
+            // client's own doing: reporting it put a bare coroutine name on screen
+            // as an error banner in the middle of a conversation.
+            if (error !is kotlinx.coroutines.CancellationException) record("$name stopped: ${error.message}")
         }
     /** Subscribe to forwarded Host events so waterfalls can be answered. */
     private fun openEvents(active: DshClient) {
@@ -985,7 +1021,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             } catch (error: Throwable) {
                 // A transport failure can surface from the socket's own thread;
                 // if it escapes here the process dies instead of retrying.
-                record("events stream aborted: ${error.message}")
+                if (error !is kotlinx.coroutines.CancellationException) record("events stream aborted: ${error.message}")
             }
         }
     }
@@ -1105,7 +1141,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     }
                 }
             } catch (error: Throwable) {
-                record("workspaces stream aborted: ${error.message}")
+                if (error !is kotlinx.coroutines.CancellationException) record("workspaces stream aborted: ${error.message}")
             }
         }
     }
@@ -1232,6 +1268,12 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      */
     fun refreshLists() {
         val active = client ?: return
+        // Deliberately not coalesced, though a flapping link re-reads a few
+        // hundred kilobytes each time: the re-read is what makes a reconnect
+        // correct, and the control baseline -- which has to be fetched anyway
+        // when that stream is re-opened -- dominates the cost. A rate limit here
+        // only bought a mirror that stayed stale for as long as it lasted, which
+        // is the bug this whole path exists to prevent.
         refreshSessions()
         openWorkspaces(active)
     }
@@ -1255,6 +1297,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     fun resync() {
         val active = client ?: return
         record("resync")
+        // Before anything else: whatever the reader typed while the link was down
+        // goes out now, in the order it was typed.
+        kickOutbox(active)
         refreshLists()
         openControl(active)
         openEvents(active)
@@ -1366,38 +1411,102 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
         if (text.isBlank()) return
-        val rpcId = UUID.randomUUID().toString()
-        val echo = TranscriptItem.Pending(
-            key = TranscriptItem.Pending.keyOf(rpcId),
-            rpcId = rpcId,
+        val entry = OutboxEntry(
+            rpcId = UUID.randomUUID().toString(),
+            sessionId = conversation.sessionId,
             text = text,
+            mode = mode,
         )
         _state.update { current ->
             val live = current.conversation ?: return@update current
-            current.copy(conversation = live.copy(items = live.items + echo))
+            current.copy(
+                conversation = live.copy(items = live.items + pendingRow(entry)),
+                outbox = current.outbox + entry,
+            )
         }
-        scope.launch(Dispatchers.IO) {
-            runCatching { active.prompt(conversation.sessionId, text, mode, rpcId) }
-                .onSuccess { record(if (mode == "queue") "queued" else "sent") }
-                .onFailure { error ->
-                    record("prompt failed: ${error.message}")
-                    _state.update { current ->
-                        val live = current.conversation ?: return@update current
-                        current.copy(
-                            conversation = live.copy(
-                                items = live.items.map { row ->
-                                    if (row.key == echo.key) {
-                                        (row as TranscriptItem.Pending).copy(failure = "not sent: ${error.message}")
-                                    } else {
-                                        row
-                                    }
-                                },
-                            ),
-                            queueError = if (mode == "queue") "Queue failed: ${error.message}" else current.queueError,
-                        )
-                    }
+        saveOutbox()
+        kickOutbox(active)
+    }
+
+    /** The transcript row one outbox entry is shown as. */
+    private fun pendingRow(entry: OutboxEntry) = TranscriptItem.Pending(
+        key = TranscriptItem.Pending.keyOf(entry.rpcId),
+        rpcId = entry.rpcId,
+        text = entry.text,
+        note = Outbox.note(entry),
+    )
+
+    /**
+     * Try to deliver what the outbox holds, oldest first, until it is empty.
+     *
+     * One worker, kicked by a send and by every reconnect, so a message typed on
+     * a dead link goes out by itself the moment the link is back -- no retyping,
+     * no button. A failure the network caused is retried with a backoff; a
+     * refusal from the Host ends the entry and says so on its row.
+     */
+    private fun kickOutbox(active: DshClient) {
+        if (outboxJob?.isActive == true) return
+        outboxJob = scope.launch(Dispatchers.IO) {
+            while (true) {
+                val entry = _state.value.outbox.firstOrNull() ?: return@launch
+                // A request that is merely slow looks exactly like one that has
+                // been forgotten, so it says which it is while it is in flight --
+                // and the stream ages go to the log, because "connected but
+                // silent" is the state a weak link hides in.
+                val slow = scope.launch(Dispatchers.IO) {
+                    delay(SLOW_REQUEST_MS)
+                    record("slow request; streams: ${active.streamAges()}")
+                    markRow(entry.rpcId, note = "network is slow — still sending…")
                 }
+                val failure = runCatching { active.prompt(entry.sessionId, entry.text, entry.mode, entry.rpcId) }
+                    .exceptionOrNull()
+                slow.cancel()
+                if (failure == null) {
+                    record("outbox: delivered ${entry.rpcId.take(8)}")
+                    // The row stays: it is retired by the message the Host logs,
+                    // which is the only proof it was read.
+                    _state.update { current -> current.copy(outbox = current.outbox.filterNot { it.rpcId == entry.rpcId }) }
+                    saveOutbox()
+                    continue
+                }
+                if (!Outbox.worthRetrying(failure)) {
+                    record("outbox: refused ${entry.rpcId.take(8)}: ${failure.message}")
+                    _state.update { current -> current.copy(outbox = current.outbox.filterNot { it.rpcId == entry.rpcId }) }
+                    saveOutbox()
+                    markRow(entry.rpcId, failure = "not sent: ${failure.message}")
+                    continue
+                }
+                val attempts = entry.attempts + 1
+                record("outbox: attempt $attempts failed (${failure.message}); retrying")
+                val retrying = entry.copy(attempts = attempts, lastError = failure.message)
+                _state.update { current ->
+                    current.copy(outbox = current.outbox.map { if (it.rpcId == entry.rpcId) retrying else it })
+                }
+                saveOutbox()
+                markRow(entry.rpcId, note = Outbox.note(retrying))
+                delay(Outbox.delayMillis(attempts))
+            }
         }
+    }
+
+    /** Update one row's state, wherever it is (the open conversation, usually). */
+    private fun markRow(rpcId: String, note: String? = null, failure: String? = null) {
+        val key = TranscriptItem.Pending.keyOf(rpcId)
+        _state.update { current ->
+            val live = current.conversation ?: return@update current
+            if (live.items.none { it.key == key }) return@update current
+            current.copy(
+                conversation = live.copy(
+                    items = live.items.map { row ->
+                        if (row.key != key) row else (row as TranscriptItem.Pending).copy(note = note, failure = failure)
+                    },
+                ),
+            )
+        }
+    }
+
+    private fun saveOutbox() {
+        viewStore?.saveOutbox(OutboxCodec.encode(_state.value.outbox))
     }
 
     /** Mutate one pending queue row; the Host's snapshot is what redraws it. */
@@ -1427,14 +1536,28 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     }
                 }
                 .onFailure { error ->
-                    // The web client's copy for this is worth matching: the row may
-                    // already have been claimed by the agent, which is not a bug.
-                    _state.update {
-                        it.copy(queueError = "$what failed: this message may have already started sending.")
-                    }
-                    record("queue $what failed: ${error.message}")
+                    // A dropped response and a refusal look the same from here --
+                    // the action may well have taken effect -- and the reader can
+                    // do nothing with "it may have already started sending". So
+                    // the queue is re-read from the Host, and what the reader is
+                    // told is what that read says.
+                    record("queue $what unresolved: ${error.message}")
+                    unresolved("$what")
                 }
         }
+    }
+
+    /**
+     * Say that a request did not come back cleanly, and re-read the Host.
+     *
+     * The alternative -- an error that guessed what happened -- told the reader
+     * their message "may have already started sending" when the truth is that
+     * this client no longer knows the queue. Asking again is the only answer that
+     * is not a guess, and it is what the next frame would have done anyway.
+     */
+    private fun unresolved(what: String) {
+        _state.update { it.copy(queueError = "$what: the network dropped that request — re-read from the Host") }
+        resync()
     }
 
     /** Begin editing a queued message in the composer. */
@@ -1675,6 +1798,16 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
 
     private fun openFollow(sessionId: String, title: String) {
         val active = client ?: return
+        // Anything the outbox is still holding for this session gets its row back:
+        // after a restart the entry survived but the transcript did not, and a
+        // message on its way with nothing on screen is worse than one that says so.
+        _state.update { current ->
+            val live = current.conversation ?: return@update current
+            val missing = current.outbox.filter { it.sessionId == sessionId }.map(::pendingRow)
+                .filterNot { row -> live.items.any { it.key == row.key } }
+            if (missing.isEmpty()) current else current.copy(conversation = live.copy(items = live.items + missing))
+        }
+        kickOutbox(active)
         followJob?.cancel()
         followJob = scope.launch(Dispatchers.IO) {
             try {
@@ -1682,6 +1815,10 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 .asHostStream("follow")
                 .collect { frame -> reduce(sessionId, title, frame) }
             } catch (error: Throwable) {
+                // Opening another session cancels this collector, and that is not
+                // something to put on screen: it showed up as "g2 was cancelled"
+                // in the middle of a conversation.
+                if (error is kotlinx.coroutines.CancellationException) return@launch
                 _state.update { current ->
                     val live = current.conversation ?: return@update current
                     current.copy(conversation = live.copy(error = error.message))

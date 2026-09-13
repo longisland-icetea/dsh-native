@@ -57,9 +57,15 @@ import kotlin.coroutines.resumeWithException
  */
 internal class MuxStreams {
     private val table = HashMap<String, Channel<MuxFrame>>()
+    private val names = LinkedHashSet<String>()
 
     fun register(streamId: String, channel: Channel<MuxFrame>) {
         table[streamId] = channel
+    }
+
+    /** Note which endpoint a stream id belongs to, so liveness can be reported per name. */
+    fun name(streamId: String, endpoint: String) {
+        names += endpoint
     }
 
     fun forget(streamId: String) {
@@ -91,6 +97,9 @@ internal class MuxStreams {
 
     /** Streams still registered; a test reads this to prove none is left dangling. */
     val size: Int get() = table.size
+
+    /** The endpoints currently open, for the liveness log. */
+    fun names(): Set<String> = names.toSet()
 }
 
 /** Where the harness lives. LAN cleartext only, by design. */
@@ -136,7 +145,64 @@ data class DshEndpoint(val host: String, val port: Int = 3080) {
     }
 }
 
-class DshException(message: String, cause: Throwable? = null) : IOException(message, cause)
+open class DshException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+/**
+ * How long to wait before repeating a unary call the network dropped.
+ *
+ * Long enough for a stale pooled connection to be out of the way, short enough
+ * that the reader does not notice a pause.
+ */
+internal const val RETRY_AFTER_MS = 150L
+
+/**
+ * Whether a failed unary call is worth one more attempt.
+ *
+ * A refusal is the Host's final word and repeating it would only delay saying
+ * so; a cancellation is the caller's. Everything else -- a refused connection, a
+ * timeout, a pooled connection the peer has already closed -- is the network,
+ * and the same request may well work a moment later.
+ */
+internal fun worthRetryingUnary(error: Throwable): Boolean =
+    error !is HostRefused && error !is kotlinx.coroutines.CancellationException
+
+/**
+ * Run one unary call under this client's transport policy: at most one more
+ * attempt, and only for a failure the network caused.
+ *
+ * Separate from the call itself so the policy can be tested without a socket --
+ * which also makes it honest about what it is: a decision, not a mechanism.
+ */
+internal suspend fun <T> withOneRetry(
+    what: String,
+    onRetry: (Throwable) -> Unit = {},
+    block: suspend () -> T,
+): T {
+    var last: Throwable? = null
+    repeat(2) { attempt ->
+        try {
+            return block()
+        } catch (error: Throwable) {
+            if (!worthRetryingUnary(error)) throw error
+            last = error
+            if (attempt == 0) {
+                onRetry(error)
+                delay(RETRY_AFTER_MS)
+            }
+        }
+    }
+    throw last ?: DshException("$what failed")
+}
+
+/**
+ * The Host answered, and the answer was a refusal.
+ *
+ * Kept distinct from every other failure on purpose: a timeout, a refused
+ * connection or a reset socket is the network, and the same request may well
+ * succeed in a moment -- which is what the outbox is for -- while a refusal is
+ * the Host's final word, and retrying it would only hide it behind a spinner.
+ */
+class HostRefused(message: String) : DshException(message)
 
 /**
  * A protocol-level client for one harness.
@@ -339,10 +405,51 @@ class DshClient(
     @Volatile
     private var activeStreams: MuxStreams? = null
 
+    /**
+     * When each named stream last delivered a frame.
+     *
+     * A weak link's worst state is not a failure but a silence: the socket is
+     * still up, the banner still says connected, and nothing arrives. Ages are
+     * the only honest way to see that, and they are cheap -- one timestamp per
+     * frame -- so they are kept for the transport log rather than guessed at.
+     */
+    private val lastFrameAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Seconds since each stream last delivered, for the log: `events 1.2s control 0.3s`. */
+    fun streamAges(): String {
+        val now = System.currentTimeMillis()
+        val open = synchronized(streamLock) { activeStreams?.names().orEmpty() }
+        if (open.isEmpty()) return "no streams open"
+        return open.sorted().joinToString(" ") { name ->
+            val age = lastFrameAt[name]?.let { (now - it) / 1000.0 } ?: null
+            "$name ${age?.let { "%.1fs".format(it) } ?: "never"}"
+        }
+    }
+
     // ── unary ─────────────────────────────────────────────────────────────────
 
-    /** One `POST /api/<method>`; throws [DshException] on transport or host error. */
-    suspend fun call(method: String, args: JsonObject): JsonElement {
+    /**
+     * One `POST /api/<method>`; throws [DshException] on transport or host error.
+     *
+     * A transport failure is tried once more, because on a weak link the most
+     * common failure is not an outage at all: it is a pooled connection the peer
+     * has already closed, which surfaces as "unexpected end of stream" on a
+     * request that would have worked a moment later. One silent retry turns that
+     * from an error the reader sees into a request that took a moment longer.
+     *
+     * Only transport failures: a refusal from the Host is its final word, and
+     * repeating it would delay saying so. Every call this client makes is safe to
+     * repeat -- the Host deduplicates a prompt by its `requestId` -- so the retry
+     * cannot cause two of anything.
+     */
+    suspend fun call(method: String, args: JsonObject): JsonElement = withOneRetry(
+        what = method,
+        onRetry = { error -> log("$method: ${error.message ?: error::class.simpleName}; retrying once") },
+    ) {
+        callOnce(method, args)
+    }
+
+    private suspend fun callOnce(method: String, args: JsonObject): JsonElement {
         val rpcId = UUID.randomUUID().toString()
         val body = json.encodeToString(RpcRequest(rpcId = rpcId, method = method, payload = RpcPayload(args)))
         val request = Request.Builder()
@@ -351,13 +458,13 @@ class DshClient(
             .build()
         val response = http.newCall(request).await()
         response.use {
-            if (!it.isSuccessful) throw DshException("$method: HTTP ${it.code}")
+            if (!it.isSuccessful) throw HostRefused("$method: HTTP ${it.code}")
             val raw = it.body?.bytes() ?: throw DshException("$method: empty body")
             val text = decodeBody(raw).toString(Charsets.UTF_8)
             val parsed = json.decodeFromString<RpcResponse>(text)
             if (parsed.rpcId != rpcId) throw DshException("$method: rpcId mismatch")
             val result = parsed.result
-            if (!result.ok) throw DshException("$method: ${result.error ?: "unknown error"}")
+            if (!result.ok) throw HostRefused("$method: ${result.error ?: "unknown error"}")
             return result.value ?: JsonPrimitive("")
         }
     }
@@ -768,6 +875,7 @@ class DshClient(
             val socket = activeSocket
             if (table == null || socket == null) null else {
                 table.register(streamId, channel)
+                table.name(streamId, endpointName)
                 table to socket
             }
         }
@@ -790,6 +898,7 @@ class DshClient(
         // healthy.
         val pump = scope.launch(Dispatchers.IO) {
             for (frame in channel) {
+                lastFrameAt[endpointName] = System.currentTimeMillis()
                 send(frame)
                 if (frame is MuxFrame.End || frame is MuxFrame.Failure) break
             }

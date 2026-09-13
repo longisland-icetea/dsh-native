@@ -702,13 +702,14 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Messages the outbox is still holding are the one
+                                // thing about a weak link a reader must not have to
+                                // guess at: they were typed, and they have not
+                                // arrived. Saying so is the whole status line.
                                 Text(
-                                    text = endpoint?.let { point ->
-                                        if (state.connected) "connected · ${point.host}"
-                                        else "reconnecting · ${point.host}"
-                                    } ?: "not configured",
+                                    text = connectionStatus(endpoint, state.connected, state.outbox.size),
                                     fontSize = 11.sp,
-                                    color = if (state.connected) MUTED else WARN,
+                                    color = if (state.connected && state.outbox.isEmpty()) MUTED else WARN,
                                 )
                                 // Model and effort are the two knobs worth reaching
                                 // mid-conversation; both live behind this chip rather
@@ -1473,6 +1474,21 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
     }
 }
 
+/**
+ * The connection line: what this client is doing about the network, in words.
+ *
+ * Three states, and the third is the one a weak link needs: a message that was
+ * typed, has not arrived, and is being retried is not "connected" from the
+ * reader's point of view. Pure so the wording is pinned by a test rather than by
+ * whoever last edited the layout.
+ */
+internal fun connectionStatus(endpoint: DshEndpoint?, connected: Boolean, waiting: Int): String {
+    if (endpoint == null) return "not configured"
+    val held = if (waiting == 0) "" else "$waiting waiting · "
+    return if (connected) "${if (waiting == 0) "connected" else "${waiting} waiting for the network"} · ${endpoint.host}"
+    else "reconnecting · $held${endpoint.host}"
+}
+
 /** One answerable Host call: tool, reason, and its decisions. */
 /** One session row: title, cwd, running state, and a long-press archive action. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -2128,6 +2144,7 @@ private fun PendingBubble(item: TranscriptItem.Pending) {
             }
             Text(
                 text = item.failure
+                    ?: item.note
                     ?: if (item.admitted) "waiting for the agent to read it" else "sending…",
                 color = if (item.failure != null) WARN else MUTED,
                 fontSize = 10.sp,

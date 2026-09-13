@@ -66,7 +66,25 @@ echo "== compile the harness"
   -Xfriend-paths="$OUT/main" \
   -d "$OUT/harness" "$ROOT/tools/live-harness/LiveHarness.kt"
 
-echo "== run against ${DSH_HOST:-192.168.255.5}:${DSH_PORT:-3080}"
+# Everything runs through a proxy the harness can cut, so "the network went away"
+# is a real failure the app has to survive rather than a mocked one. The switch
+# file *is* the link: the harness deletes it, and creates it again to restore it.
+HOST="${DSH_HOST:-192.168.255.5}"
+PORT="${DSH_PORT:-3080}"
+PROXY_PORT="${DSH_PROXY_PORT:-3099}"
+LINK_SWITCH="$OUT/link.up"
+: > "$LINK_SWITCH"
+# `DSH_PROXY_ARGS` makes the link weak in other ways -- `--delay-ms 1500` for a
+# slow one, `--stall-ms 8000 --stall-chance 0.3` for a black hole -- without
+# changing anything else about the run.
+python3 "$ROOT/tools/flaky-proxy.py" --listen "0.0.0.0:$PROXY_PORT" --target "127.0.0.1:$PORT" --switch "$LINK_SWITCH" \
+  ${DSH_PROXY_ARGS:-} > "$OUT/proxy.log" 2>&1 &
+PROXY_PID=$!
+trap 'kill "$PROXY_PID" 2>/dev/null || true' EXIT
+sleep 1
+
+echo "== run: $HOST:$PORT through the cuttable proxy 127.0.0.1:$PROXY_PORT"
 # The stub directory comes before android.jar, which is the whole trick.
-java -cp "$OUT/stub:$REFLECT:$CP:$OUT/main:$OUT/harness" \
-  io.github.longislandicetea.dshnative.LiveHarnessKt "$@"
+DSH_LINK_SWITCH="$LINK_SWITCH" DSH_REAL_HOST="$HOST" DSH_REAL_PORT="$PORT" \
+  java -cp "$OUT/stub:$REFLECT:$CP:$OUT/main:$OUT/harness" \
+  io.github.longislandicetea.dshnative.LiveHarnessKt 127.0.0.1 "$PROXY_PORT" "$@"

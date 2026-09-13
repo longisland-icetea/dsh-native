@@ -58,6 +58,9 @@ private class Report {
     }
 }
 
+/** The switch file the proxy watches, when the harness was started with one. */
+private fun linkSwitch(): String? = System.getenv("DSH_LINK_SWITCH")?.takeIf { it.isNotBlank() }
+
 private suspend fun <T> until(what: String, timeoutMs: Long = TIMEOUT_MS, read: () -> T?): T =
     withTimeoutOrNull(timeoutMs) {
         while (true) {
@@ -80,6 +83,16 @@ fun main(args: Array<String>): Unit = runBlocking {
     // to a Host that was changed by someone else, not by itself.
     val outsider = DshClient(endpoint, scope)
     outsider.start()
+    // One more that does *not* go through the cuttable link: some checks need the
+    // Host to change while this app cannot hear it, and a client behind the same
+    // cut cannot cause that.
+    val direct = DshClient(
+        DshEndpoint(
+            System.getenv("DSH_REAL_HOST") ?: "192.168.255.5",
+            (System.getenv("DSH_REAL_PORT") ?: "3080").toInt(),
+        ),
+        scope,
+    ).also { it.start() }
     holder.connect(endpoint)
 
     // `SessionGroup.fromWorkspaces` is the drawer's own rule -- origin, archive
@@ -220,6 +233,77 @@ fun main(args: Array<String>): Unit = runBlocking {
         holder.cancel()
         delay(1_500)
 
+        // ── a message sent on a dead link goes out by itself ──────────────────
+        //
+        // Through the cuttable proxy the harness controls, so this is a real
+        // failure: the socket dies, HTTP dies, and the words the reader typed
+        // have to survive both without being retyped.
+        linkSwitch()?.let { switch ->
+            val weak = "HARNESS-WEAK sent while the link was down"
+            java.io.File(switch).delete()
+            until("the link to be down", timeoutMs = 15_000) { holder.state.value.connected.not().takeIf { it } }
+            holder.send(weak)
+            val retrying = until("the row to admit it is being retried", timeoutMs = 30_000) {
+                holder.state.value.conversation?.items
+                    ?.filterIsInstance<TranscriptItem.Pending>()
+                    ?.firstOrNull { it.text == weak && it.note != null }
+            }
+            report.check("a message sent on a dead link is kept and retried",
+                retrying.waiting, retrying.note ?: "no note")
+            report.check("and it is in the outbox, not lost",
+                holder.state.value.outbox.any { it.text == weak })
+            java.io.File(switch).createNewFile()
+            until("the link to come back", timeoutMs = 30_000) { holder.state.value.connected.takeIf { it } }
+            val delivered = until("the outbox to empty itself", timeoutMs = 60_000) {
+                holder.state.value.outbox.none { it.text == weak }.takeIf { it }
+            }
+            report.check("the outbox delivers it once the link returns, with no retyping", delivered)
+            until("the message to be logged", timeoutMs = 60_000) {
+                holder.state.value.conversation?.items
+                    ?.filterIsInstance<TranscriptItem.User>()
+                    ?.firstOrNull { it.text == weak }
+            }
+            report.check("and the Host has it", true)
+        }
+
+        // ── a slow link is survivable, and says so ────────────────────────────
+        //
+        // Run with `DSH_PROXY_ARGS=--delay-ms 1500` and every frame and every
+        // request takes a second and a half. Nothing fails; everything is slow,
+        // which is the state a reader cannot tell from a hang unless the client
+        // says so.
+        if (System.getenv("DSH_PROXY_ARGS")?.contains("delay-ms") == true) {
+            val slow = "HARNESS-SLOW typed on a slow link"
+            holder.send(slow)
+            // Watch the whole life of the row: a note may appear and be replaced,
+            // and a check that waits for one the message has already left can only
+            // time out.
+            var notes = emptyList<String>()
+            var failures = emptyList<String>()
+            val landed = until("it to arrive on a slow link", timeoutMs = 120_000) {
+                val rows = holder.state.value.conversation?.items ?: return@until null
+                rows.filterIsInstance<TranscriptItem.Pending>().firstOrNull { it.text == slow }?.let { row ->
+                    row.note?.let { if (it !in notes) notes = notes + it }
+                    row.failure?.let { if (it !in failures) failures = failures + it }
+                }
+                rows.filterIsInstance<TranscriptItem.User>().firstOrNull { it.text == slow }
+            }
+            report.check("a message on a slow link arrives without the reader doing anything", landed.text == slow)
+            report.check("and it is never called failed for being slow", failures.isEmpty(), failures.joinToString())
+            // `DSH_EXPECT_SLOW_NOTE=1` says the run means to be slow enough that the
+            // row must say so (a request in flight for seconds, not a merely slow
+            // link). Without it, the check is the other way round: a link that is
+            // slow but working must *not* be reported as trouble.
+            val expected = System.getenv("DSH_EXPECT_SLOW_NOTE") == "1"
+            if (expected) {
+                report.check("a request that takes seconds says it is slow, not stuck",
+                    notes.any { it.contains("slow") }, notes.joinToString())
+            } else {
+                report.check("a slow but working link is not reported as trouble",
+                    notes.none { it.contains("slow") }, notes.joinToString())
+            }
+        }
+
         // ── the Host's own lists stay in step, including across a reconnect ──
         //
         // These are the two mirrors that went stale in the field more than once:
@@ -260,7 +344,6 @@ fun main(args: Array<String>): Unit = runBlocking {
             fun resyncs(): Int = holder.state.value.log.count { it == "resync" }
             val before = resyncs()
             report.check("the harness can drop the socket", holder.dropTransport())
-            outsider.prompt(other, "HARNESS-OFFLINE reply with the single word FOUND")
             until("a new socket generation to re-read the Host", timeoutMs = 60_000) {
                 (holder.state.value.connected && resyncs() > before).takeIf { it }
             }
@@ -280,10 +363,32 @@ fun main(args: Array<String>): Unit = runBlocking {
                 appDock == hostDock,
                 "dock=$appDock host=$hostDock",
             )
-            val sawRunning = until("the re-read list to show the turn running", timeoutMs = 60_000) {
-                holder.state.value.sessions.firstOrNull { it.sessionId == other }?.takeIf { it.running }
+            // A turn this app cannot hear about. The link is cut for real -- the
+            // proxy refuses everything, so it cannot reconnect while it is down --
+            // and the prompt comes from a client that is not behind the cut, so
+            // what is being tested is the re-read and not the race between "the
+            // app reconnects" and "the turn starts".
+            val switch = linkSwitch()
+            if (switch == null) {
+                report.check("a link that can be cut is available to test with", false, "DSH_LINK_SWITCH unset")
+            } else {
+                java.io.File(switch).delete()
+                until("the app's link to be cut", timeoutMs = 15_000) {
+                    holder.state.value.connected.not().takeIf { it }
+                }
+                // A turn that is still running when this client re-reads the list:
+                // a one-word reply can finish inside the reconnect, which would
+                // make the check depend on the race rather than on the re-read.
+                direct.prompt(other, "HARNESS-OFFLINE run bash: sleep 20 — then reply FOUND")
+                java.io.File(switch).createNewFile()
+                until("the link to come back", timeoutMs = 30_000) { holder.state.value.connected.takeIf { it } }
+                // `api-session/status` is an emit the app was not there to receive,
+                // so only re-reading the list can tell it.
+                val sawRunning = until("the re-read list to show the turn running", timeoutMs = 60_000) {
+                    holder.state.value.sessions.firstOrNull { it.sessionId == other }?.takeIf { it.running }
+                }
+                report.check("a turn it was not listening for is visible afterwards", sawRunning.running)
             }
-            report.check("a turn it was not listening for is visible afterwards", sawRunning.running)
             report.check("and the transcript was re-established too",
                 holder.state.value.conversation?.items?.isNotEmpty() == true)
             // Archived earlier in this run and never unarchived (the Host has no
@@ -291,6 +396,7 @@ fun main(args: Array<String>): Unit = runBlocking {
             report.check("with the archive set still in step",
                 holder.state.value.archived.contains(other))
         } finally {
+            runCatching { direct.cancel(other) }
             runCatching { outsider.cancel(other) }
             runCatching { outsider.archiveSession(other) }
         }
@@ -304,6 +410,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         runCatching { sessionId?.let { outsider.archiveSession(it) } }
         holder.disconnect(quiet = true)
         outsider.stop()
+        direct.stop()
         scope.cancel()
     }
     failure?.let { report.check("the run finished without timing out", false, it.message ?: it.toString()) }
