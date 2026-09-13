@@ -1188,13 +1188,48 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     }
 
     /** Run a slash command such as `/compact` against the open conversation. */
+    /**
+     * Submit one composer line: a slash command if the Host knows one, a message
+     * otherwise.
+     *
+     * The Host is the one that decides, not this client's copy of the command
+     * list -- an unrecognised line comes back as an answer with no value rather
+     * than an error, and then it *is* a message, which is what the web client does
+     * with it too. A line this client never sends anywhere is worse than either.
+     *
+     * What the command did is not reported here: the Host logs `command/run` and
+     * `command/done` into the session, and those are rows like any other. The RPC
+     * only says whether the line was a command at all.
+     */
     fun runCommand(line: String) {
         val active = client ?: return
         val conversation = _state.value.conversation ?: return
         scope.launch(Dispatchers.IO) {
             runCatching { active.runCommand(conversation.sessionId, line) }
-                .onSuccess { record("command sent: $line") }
-                .onFailure { record("command failed: ${it.message}") }
+                .onSuccess { matched ->
+                    if (matched) {
+                        record("command: $line")
+                    } else {
+                        record("not a command, sending it as a message: $line")
+                        send(line)
+                    }
+                }
+                .onFailure { error ->
+                    // Silence here is what made the reader think a command had
+                    // worked: the row they were looking for never came and nothing
+                    // said why.
+                    record("command failed: ${error.message}")
+                    noteRow("command not sent: ${error.message}")
+                }
+        }
+    }
+
+    /** Put one line of this client's own into the transcript, where the reader is looking. */
+    private fun noteRow(text: String) {
+        val key = "note:${UUID.randomUUID()}"
+        _state.update { current ->
+            val live = current.conversation ?: return@update current
+            current.copy(conversation = live.copy(items = live.items + TranscriptItem.Note(key, text)))
         }
     }
 
@@ -1964,6 +1999,11 @@ internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): Transcr
             val effort = choice.effort?.let { " · $it" } ?: ""
             TranscriptItem.Note(key, "model: ${choice.provider}/${choice.model}$effort")
         }
+        // A command's own record of itself: what was asked, and what came of it.
+        // Without these the reader saw nothing at all -- a command's reply is not
+        // a message, so nothing else in the transcript would ever show it.
+        "command/run" -> EventPayload.commandRun(event)?.let { TranscriptItem.Note(key, it) }
+        "command/done" -> EventPayload.commandOutcome(event)?.let { TranscriptItem.Note(key, it) }
         "permission/preset", "sandbox/mode", "approval/policy",
         "compaction/start", "compaction/end",
         -> EventPayload.settingChange(event)?.let { (name, value) ->

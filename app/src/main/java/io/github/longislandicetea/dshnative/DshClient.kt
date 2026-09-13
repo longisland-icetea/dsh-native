@@ -23,6 +23,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.Call
@@ -203,6 +204,21 @@ internal suspend fun <T> withOneRetry(
  * the Host's final word, and retrying it would only hide it behind a spinner.
  */
 class HostRefused(message: String) : DshException(message)
+
+/**
+ * The wire shape of `commands/execute`.
+ *
+ * All three fields are required by the gateway's descriptor, `submittedAttachments`
+ * included even when there are none: leaving it out made the gateway reject
+ * *every* command with `arguments-invalid`, so `/compact` and its siblings did
+ * nothing at all on the phone while the log said only that a command had failed.
+ * Pure, and separate, because the bug was a missing field rather than bad logic.
+ */
+internal fun commandExecuteArgs(sessionId: String, line: String): JsonObject = buildJsonObject {
+    put("agentId", JsonPrimitive(sessionId))
+    put("line", JsonPrimitive(line))
+    put("submittedAttachments", buildJsonArray { })
+}
 
 /**
  * A protocol-level client for one harness.
@@ -442,14 +458,25 @@ class DshClient(
      * repeat -- the Host deduplicates a prompt by its `requestId` -- so the retry
      * cannot cause two of anything.
      */
-    suspend fun call(method: String, args: JsonObject): JsonElement = withOneRetry(
+    suspend fun call(method: String, args: JsonObject): JsonElement =
+        callOrNull(method, args) ?: JsonPrimitive("")
+
+    /**
+     * The same call, keeping "the Host sent no value" distinct from a value.
+     *
+     * `commands/execute` answers an unrecognised line with a bare `{ok: true}`,
+     * and that absence *is* the answer: the line was not a command, so the caller
+     * may send it as a message instead. Folding it into an empty value -- which
+     * the plain [call] does -- threw exactly that distinction away.
+     */
+    suspend fun callOrNull(method: String, args: JsonObject): JsonElement? = withOneRetry(
         what = method,
         onRetry = { error -> log("$method: ${error.message ?: error::class.simpleName}; retrying once") },
     ) {
         callOnce(method, args)
     }
 
-    private suspend fun callOnce(method: String, args: JsonObject): JsonElement {
+    private suspend fun callOnce(method: String, args: JsonObject): JsonElement? {
         val rpcId = UUID.randomUUID().toString()
         val body = json.encodeToString(RpcRequest(rpcId = rpcId, method = method, payload = RpcPayload(args)))
         val request = Request.Builder()
@@ -465,7 +492,7 @@ class DshClient(
             if (parsed.rpcId != rpcId) throw DshException("$method: rpcId mismatch")
             val result = parsed.result
             if (!result.ok) throw HostRefused("$method: ${result.error ?: "unknown error"}")
-            return result.value ?: JsonPrimitive("")
+            return result.value
         }
     }
 
@@ -711,13 +738,8 @@ class DshClient(
      * the session's agent. Compaction is therefore reachable as a command line,
      * and its effect arrives as ordinary compaction events on the follow stream.
      */
-    suspend fun runCommand(sessionId: String, line: String) {
-        val args = buildJsonObject {
-            put("agentId", JsonPrimitive(sessionId))
-            put("line", JsonPrimitive(line))
-        }
-        call("commands/execute", args)
-    }
+    suspend fun runCommand(sessionId: String, line: String): Boolean =
+        callOrNull("commands/execute", commandExecuteArgs(sessionId, line)) != null
 
     /**
      * Live Host-wide control state: pending queues, jobs and projections.

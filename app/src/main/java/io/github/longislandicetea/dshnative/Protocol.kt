@@ -827,6 +827,37 @@ object EventPayload {
     }
 
     /** A session-scoped setting change the transcript is worth marking. */
+    /**
+     * `command/run` as a line a reader recognises: the command as they typed it.
+     *
+     * The Host records `args` only for commands that keep their input, and omits
+     * it for ones that do not -- so the line is rebuilt from what is there rather
+     * than assumed to have both halves.
+     */
+    fun commandRun(event: SessionEvent): String? {
+        val data = event.data as? JsonObject ?: return null
+        val name = (data["name"] as? JsonPrimitive)?.contentOrNull ?: return null
+        val args = (data["args"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        return if (args.isEmpty()) "/$name" else "/$name $args"
+    }
+
+    /**
+     * `command/done` as the command's answer.
+     *
+     * Both kinds say something: a success may carry text (a listing, a usage
+     * line) and an error always does. A success with nothing to say is silence,
+     * because the `command/run` row above it already says what was asked.
+     */
+    fun commandOutcome(event: SessionEvent): String? {
+        val data = event.data as? JsonObject ?: return null
+        val text = (data["text"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
+        return when ((data["kind"] as? JsonPrimitive)?.contentOrNull) {
+            "error" -> text.ifEmpty { "the command failed" }
+            "success" -> text.ifEmpty { null }
+            else -> null
+        }
+    }
+
     fun settingChange(event: SessionEvent): Pair<String, String>? {
         val data = event.data as? JsonObject ?: return null
         fun value(key: String) = (data[key] as? JsonPrimitive)?.contentOrNull

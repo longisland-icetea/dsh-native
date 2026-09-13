@@ -1425,7 +1425,12 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
                         // follows the mode the composer is in.
                         when {
                             editing != null -> holder.queueAction(editing, QueueAction.edit(text), "edit")
-                            isCommand(state, text) -> holder.runCommand(text.trim())
+                            // Anything shaped like a command line goes to the Host
+                            // to judge: this client's copy of the command list can
+                            // be stale, and a line the Host does not recognise is
+                            // sent as a message by `runCommand` itself, exactly as
+                            // the web client does it.
+                            CommandMenu.commandLine(text) != null -> holder.runCommand(text.trim())
                             // Default is steer, so a correction lands while the
                             // agent is working; queueing is the deliberate choice
                             // behind a long press, for "after this turn".
@@ -1891,11 +1896,17 @@ private fun ProseBlock(block: MarkdownBlock.Prose) {
  * Checked against the loaded command list rather than by shape alone: sending
  * `/etc/hosts` as a command would fail, and the reader meant it as prose.
  */
-internal fun isCommand(state: AppState, draft: String): Boolean {
-    val line = CommandMenu.commandLine(draft) ?: return false
-    val name = line.substringBefore(' ').drop(1)
-    return state.commands.any { it.name == name }
-}
+/**
+ * Whether a draft is shaped like a slash command.
+ *
+ * Only the shape: whether the *Host* has such a command is its own answer to
+ * give, and it gives it in `commands/execute` -- an unrecognised line comes back
+ * with no value, and the line is then sent as a message. Deciding here from a
+ * cached command list meant a command this client had not heard of was sent to
+ * the model as prose instead of being run.
+ */
+internal fun isCommand(state: AppState, draft: String): Boolean =
+    CommandMenu.commandLine(draft) != null
 
 internal val TABLE_CELL_PADDING = 8.dp
 internal val TABLE_RULE = Color(0xFF2A2F38)

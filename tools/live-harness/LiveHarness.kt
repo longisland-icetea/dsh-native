@@ -266,6 +266,39 @@ fun main(args: Array<String>): Unit = runBlocking {
             report.check("and the Host has it", true)
         }
 
+        // ── a slash command runs, and says what came of it ────────────────────
+        //
+        // `/compact` did nothing on the phone: the gateway requires
+        // `submittedAttachments` and it was not sent, so every command was
+        // refused. `/goal` is used here because it is harmless and always
+        // answers with its usage line.
+        val before = holder.state.value.conversation?.items?.size ?: 0
+        holder.runCommand("/goal")
+        val answered = until("the command's outcome to be logged", timeoutMs = 60_000) {
+            holder.state.value.conversation?.items
+                ?.filterIsInstance<TranscriptItem.Note>()
+                ?.firstOrNull { it.text.contains("Usage: /goal") }
+        }
+        report.check("a slash command runs and reports what came of it", answered.text.isNotBlank(), answered.text)
+        val ran = holder.state.value.conversation?.items
+            ?.filterIsInstance<TranscriptItem.Note>()
+            ?.any { it.text == "/goal" } == true
+        report.check("and the command itself is on screen", ran)
+        report.check("and no message was invented for it",
+            holder.state.value.outbox.none { it.text == "/goal" } &&
+                (holder.state.value.conversation?.items?.size ?: 0) > before)
+
+        // A line the Host does not know is a *message*, not a command: the web
+        // client settles that the same way, and it is what keeps a stale command
+        // list from swallowing prose.
+        holder.runCommand("/definitely-not-a-command HARNESS-PROSE")
+        val prose = until("an unrecognised line to be sent as a message", timeoutMs = 60_000) {
+            holder.state.value.conversation?.items
+                ?.filterIsInstance<TranscriptItem.Pending>()
+                ?.firstOrNull { it.text.startsWith("/definitely-not-a-command") }
+        }
+        report.check("a line that is not a command is sent as a message", prose.text.contains("HARNESS-PROSE"))
+
         // ── a slow link is survivable, and says so ────────────────────────────
         //
         // Run with `DSH_PROXY_ARGS=--delay-ms 1500` and every frame and every
