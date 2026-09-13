@@ -65,6 +65,32 @@ data class QuestionAnswerItem(
     val custom: String? = null,
 )
 
+/**
+ * Add one pending Host call, replacing any card for the same call.
+ *
+ * The Host replays every unanswered waterfall to a client that connects, and this
+ * client re-opens `$events` on every transport generation, every foreground and
+ * every Refresh -- so the same question would otherwise be put on screen again
+ * and again, each copy answerable.
+ */
+internal fun pendingAfter(
+    existing: List<PendingInteraction>,
+    incoming: PendingInteraction,
+): List<PendingInteraction> = existing.filterNot { it.eventId == incoming.eventId } + incoming
+
+/**
+ * Drop the cards the Host did not hand back when this client reconnected.
+ *
+ * A waterfall that was answered on another client while this one was away is
+ * settled for good: the Host replays only what is *still* unanswered, and it
+ * never replays the `cancel` that retired it. A card left on screen is then
+ * worse than no card -- it looks answerable and its Submit does nothing.
+ */
+internal fun pendingAfterReplay(
+    existing: List<PendingInteraction>,
+    replayed: Set<String>,
+): List<PendingInteraction> = existing.filter { it.eventId in replayed }
+
 data class PendingInteraction(
     val sessionId: String,
     val eventId: String,
@@ -145,6 +171,14 @@ data class PendingInteraction(
  * `StreamResubscribeTest`, which is what showed the plain `retry` version of this
  * fix does nothing at all for a clean end.
  */
+/**
+ * How long to wait for the Host's replay of unanswered waterfalls.
+ *
+ * They arrive in one batch straight after `ready`, so this only has to cover a
+ * round trip on a LAN while leaving no card on screen that has been answered.
+ */
+private const val PENDING_AFTER_REPLAY_MS = 2_000L
+
 internal fun <T> Flow<T>.resubscribe(
     delayMillis: Long,
     onEnd: (Throwable?) -> Unit = {},
@@ -219,6 +253,15 @@ sealed interface TranscriptItem {
         val text: String,
         /** The Host's inbox has listed it: proof the prompt was admitted. */
         val admitted: Boolean = false,
+        /**
+         * The seq of the frame that admitted it.
+         *
+         * It dates the row, which is what lets a snapshot be judged: a window
+         * that still reaches back past this seq would contain the message had it
+         * been logged, so its absence is proof it was thrown away; a window that
+         * starts after it cannot tell the two apart.
+         */
+        val admittedSeq: Long? = null,
         /** Set once the send is over and did not land, with the reason. */
         val failure: String? = null,
     ) : TranscriptItem {
@@ -230,6 +273,16 @@ sealed interface TranscriptItem {
 
             /** What a message the Host let go says for itself. */
             const val DROPPED = "not delivered — it left the queue before a turn read it"
+
+            /**
+             * What a message is when the evidence has aged out.
+             *
+             * A reconnect only re-reads the newest window of the log, so a
+             * message delivered while this client was away can be out of sight.
+             * Claiming either way would be a guess; this says exactly what is
+             * known -- the Host is not holding it any more.
+             */
+            const val UNCONFIRMED = "sent — the Host no longer lists it"
         }
     }
 
@@ -466,6 +519,16 @@ data class SessionGroup(
     }
 }
 
+/**
+ * Everything the app shows about the Host, and how it stays true.
+ *
+ * These fields are mirrors: each is either read at a moment this client chooses
+ * or streamed as a delta, and none of them may assume the connection that
+ * delivered it still exists. [docs/reconnect.md] is the rulebook -- which mirror
+ * comes from which stream, what a snapshot means, and which test pins each rule
+ * -- because the same bug was fixed four times, once per stream, before the
+ * pattern was recognised.
+ */
 data class AppState(
     val endpoint: DshEndpoint? = null,
     val connected: Boolean = false,
@@ -634,6 +697,35 @@ private class SessionViewStore(context: android.content.Context) {
 }
 
 /**
+ * Adopt one `session/control` baseline.
+ *
+ * A baseline is a *snapshot*: it carries an entry for every session, empty when
+ * nothing is queued. It therefore **replaces** the queue map. Merging instead --
+ * which is what this did -- left a stale row behind for good: a steer the Host
+ * claimed while this client's socket was down kept showing in the dock after
+ * every reconnect, still claiming a message was waiting.
+ *
+ * The metrics stay a merge: those are numbers, and a stale number reads as a
+ * number, while a stale queue row is a claim about work in flight.
+ */
+internal fun AppState.withControlBaseline(snapshot: JsonObject): AppState {
+    val metrics = mutableMapOf<String, Metrics>()
+    (snapshot["projections"] as? JsonObject)?.forEach { (sessionId, projection) ->
+        val bag = (projection as? JsonObject)?.get("values") as? JsonObject
+        val parsed = runCatching {
+            DshWire.json.decodeFromJsonElement(ProjectionValues.serializer(), bag ?: JsonObject(emptyMap()))
+        }.getOrNull()
+        Metrics.from(parsed).takeUnless { it.isEmpty }?.let { metrics[sessionId] = it }
+    }
+    val queues = mutableMapOf<String, List<QueuedItem>>()
+    (snapshot["queues"] as? JsonObject)?.forEach { (sessionId, items) ->
+        val parsed = QueueCodec.parse(items as? JsonArray)
+        if (parsed.isNotEmpty()) queues[sessionId] = parsed
+    }
+    return copy(metrics = this.metrics + metrics, queues = queues)
+}
+
+/**
  * Apply one session-list delta.
  *
  * Everything here is a patch to a row that already exists: a delta carries no
@@ -769,6 +861,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var eventClientId: String? = null
     /** When the session list was last re-read because a delta named a stranger. */
     private var lastListRereadAt = 0L
+    /** Waterfall ids the Host handed back since the last `ready`. */
+    private val replayedWaterfalls = mutableSetOf<String>()
 
     fun connect(endpoint: DshEndpoint) {
         disconnect(quiet = true)
@@ -844,6 +938,17 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                             is HostEvent.Ready -> {
                                 eventClientId = host.clientId
                                 record("events ready (client ${host.clientId.take(8)})")
+                                // The Host replays every unanswered waterfall right
+                                // after this frame, so anything held here that does
+                                // not come back is settled. Waiting a moment costs
+                                // nothing and keeps the replay one batch.
+                                replayedWaterfalls.clear()
+                                scope.launch(Dispatchers.IO) {
+                                    delay(PENDING_AFTER_REPLAY_MS)
+                                    _state.update { state ->
+                                        state.copy(pending = pendingAfterReplay(state.pending, replayedWaterfalls))
+                                    }
+                                }
                             }
                             is HostEvent.Waterfall -> {
                                 val pending = PendingInteraction.from(host)
@@ -859,7 +964,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                                     }
                                 } else {
                                     record("pending ${pending.kind}: ${pending.toolName ?: "?"}")
-                                    _state.update { it.copy(pending = it.pending + pending) }
+                                    replayedWaterfalls += host.eventId
+                                    _state.update { it.copy(pending = pendingAfter(it.pending, pending)) }
                                 }
                             }
                             is HostEvent.Cancelled ->
@@ -1184,21 +1290,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         when (obj["type"]?.jsonPrimitive?.contentOrNull) {
             "baseline" -> {
                 val snapshot = obj["value"] as? JsonObject ?: return
-                val metrics = mutableMapOf<String, Metrics>()
-                (snapshot["projections"] as? JsonObject)?.forEach { (sessionId, projection) ->
-                    val bag = (projection as? JsonObject)?.get("values") as? JsonObject
-                    val parsed = runCatching {
-                        DshWire.json.decodeFromJsonElement(ProjectionValues.serializer(), bag ?: JsonObject(emptyMap()))
-                    }.getOrNull()
-                    Metrics.from(parsed).takeUnless { it.isEmpty }?.let { metrics[sessionId] = it }
-                }
-                val queues = mutableMapOf<String, List<QueuedItem>>()
-                (snapshot["queues"] as? JsonObject)?.forEach { (sessionId, items) ->
-                    val parsed = QueueCodec.parse(items as? JsonArray)
-                    if (parsed.isNotEmpty()) queues[sessionId] = parsed
-                }
-                _state.update { it.copy(metrics = it.metrics + metrics, queues = it.queues + queues) }
-                record("control baseline: ${metrics.size} sessions with usage, ${queues.size} with a queue")
+                _state.update { it.withControlBaseline(snapshot) }
+                val usage = (snapshot["projections"] as? JsonObject)?.size ?: 0
+                val waiting = (snapshot["queues"] as? JsonObject)
+                    ?.count { (it.value as? JsonArray)?.isNotEmpty() == true } ?: 0
+                record("control baseline: $usage sessions with usage, $waiting with a queue")
             }
             // A queue frame is that session's whole queue, so an empty array is
             // the removal -- there is no per-item delta to apply.

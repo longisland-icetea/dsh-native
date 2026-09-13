@@ -45,12 +45,19 @@ internal fun foldFollowFrame(state: TranscriptFold, frame: FollowFrame): Transcr
     val stepped = seeded.apply(spliceOf(frame))
     val delivered = state.deliveredRpcIds + deliveredRpcIds(frame)
     val merged = merge(conversation, frame, usage)
-    // A snapshot replaces the inbox wholesale, so it is also evidence: a row the
-    // Host's inbox no longer lists, with no durable message to show for itself,
-    // has left it for good. Without this the discard was invisible whenever the
-    // splice that reported it was missed -- which is exactly when a snapshot
-    // arrives instead, since that is what a reconnect gets.
-    val settled = settle(merged.items, stepped.inbox, stepped.discarded || frame is FollowFrame.Snapshot, delivered)
+    // A snapshot replaces the inbox wholesale, so it is evidence too -- but only
+    // as far back as its window reaches. `windowOldest` is where that window
+    // starts, and `frameSeq` is when this frame happened; `settle` uses the pair
+    // to tell "the Host threw it away" from "it was delivered while I was away".
+    val windowOldest = (frame as? FollowFrame.Snapshot)?.records?.minOfOrNull { it.seq }
+    val settled = settle(
+        items = merged.items,
+        inbox = stepped.inbox,
+        discarded = stepped.discarded,
+        delivered = delivered,
+        frameSeq = (frame as? FollowFrame.Event)?.event?.seq,
+        windowOldestSeq = windowOldest,
+    )
     return TranscriptFold(
         conversation = merged.copy(items = settled),
         pendingTurnUsage = usage,
@@ -79,13 +86,28 @@ internal fun settle(
     inbox: Inbox,
     discarded: Boolean,
     delivered: Set<String>,
+    /** The seq of the frame being folded, when it is a durable event. */
+    frameSeq: Long? = null,
+    /** Where a snapshot's window starts, when the frame is a snapshot. */
+    windowOldestSeq: Long? = null,
 ): List<TranscriptItem> = items.mapNotNull { item ->
     if (item !is TranscriptItem.Pending) return@mapNotNull item
+    val dated = if (frameSeq != null) item.copy(admittedSeq = frameSeq) else item
     when {
         item.rpcId in delivered -> null
-        inbox.holds(item.rpcId) -> item.copy(admitted = true, failure = null)
-        discarded && item.admitted -> item.copy(failure = TranscriptItem.Pending.DROPPED)
-        else -> item
+        inbox.holds(item.rpcId) -> dated.copy(admitted = true, failure = null)
+        // The Host said so, in a splice that carried `outcome: "canceled"`.
+        discarded && item.admitted -> dated.copy(failure = TranscriptItem.Pending.DROPPED)
+        // A snapshot that still reaches back past the moment this row was
+        // admitted: had the message been logged, the window would hold it, and
+        // `delivered` would have retired the row above. It is not there, so the
+        // Host let it go.
+        windowOldestSeq != null && item.admitted && (item.admittedSeq ?: Long.MAX_VALUE) >= windowOldestSeq ->
+            dated.copy(failure = TranscriptItem.Pending.DROPPED)
+        // The window has moved past that moment, so a delivery and a discard look
+        // the same from here. Say only what is known.
+        windowOldestSeq != null && item.admitted -> dated.copy(failure = TranscriptItem.Pending.UNCONFIRMED)
+        else -> dated
     }
 }
 

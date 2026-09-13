@@ -96,6 +96,14 @@ The emulator is not an option here: WSL2 exposes no `/dev/kvm` unless the
 Windows host provides nested virtualization, which needs Windows 11 (this host
 is Windows 10 19044), and the x86_64 Android images refuse to boot without it.
 
+## Where the client's state rules live
+
+`docs/reconnect.md` is the rulebook for anything that arrives over a stream: what
+a snapshot means versus a delta, which mirrors are re-read on a reconnect, and
+which test pins each rule. Read it before adding a stream or a cached list; the
+same "the screen was stale" bug was fixed once per stream before the pattern was
+written down.
+
 ## Where the event shapes come from
 
 Guessing an event payload has broken this app twice (the tool-result fold and the

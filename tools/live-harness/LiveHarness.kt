@@ -7,7 +7,13 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.system.exitProcess
@@ -87,6 +93,29 @@ fun main(args: Array<String>): Unit = runBlocking {
         collapsed = emptySet(),
         showArchived = false,
     ).any { group -> group.sessions.any { it.sessionId == id } }
+
+    /**
+     * The Host's own queue for one session, read on a fresh subscriber.
+     *
+     * A fresh `session/control` connection starts with a baseline, which is the
+     * authoritative answer -- "the app's dock is empty" is the wrong question,
+     * because a message can legitimately still be pending.
+     */
+    suspend fun hostQueueNow(id: String): List<QueuedItem> =
+        withTimeoutOrNull(10_000) {
+            val answer = CompletableDeferred<List<QueuedItem>>()
+            val job = scope.launch(Dispatchers.IO) {
+                outsider.control().collect { frame ->
+                    val value = (frame as? MuxFrame.Item)?.value as? JsonObject ?: return@collect
+                    if (value["type"]?.jsonPrimitive?.contentOrNull != "baseline") return@collect
+                    val table = (value["value"] as? JsonObject)?.get("queues") as? JsonObject
+                    answer.complete(QueueCodec.parse(table?.get(id) as? JsonArray))
+                }
+            }
+            val queues = answer.await()
+            job.cancel()
+            queues
+        } ?: emptyList()
 
     var sessionId: String? = null
     var failure: Throwable? = null
@@ -236,6 +265,21 @@ fun main(args: Array<String>): Unit = runBlocking {
                 (holder.state.value.connected && resyncs() > before).takeIf { it }
             }
             report.check("a reconnect re-reads every mirror", resyncs() > before)
+            // The dock must not keep a row the Host no longer has. A baseline is
+            // a snapshot, so this is the check that it is applied as one: the
+            // steer below is claimed while this client's socket is down, and the
+            // dock has to be empty afterwards either way.
+            // Whatever the Host ends up holding, this client's dock has to say
+            // the same thing: merging a stale row into the baseline left one in
+            // the dock for good, which is what the phone showed.
+            delay(1_500)
+            val appDock = holder.state.value.queues[session].orEmpty().map { it.label }
+            val hostDock = hostQueueNow(session).map { it.label }
+            report.check(
+                "the dock agrees with the Host's own queue after a reconnect",
+                appDock == hostDock,
+                "dock=$appDock host=$hostDock",
+            )
             val sawRunning = until("the re-read list to show the turn running", timeoutMs = 60_000) {
                 holder.state.value.sessions.firstOrNull { it.sessionId == other }?.takeIf { it.running }
             }

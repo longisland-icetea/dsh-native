@@ -286,30 +286,90 @@ class SteerDisplayTest {
     }
 
     /**
-     * A discard this client never saw reported is still a discard.
-     *
-     * The splice that says so is a frame like any other: if the stream was
-     * reconnecting, the snapshot that arrives instead says only what the inbox
-     * *is*, not how it emptied. A row the fresh inbox does not hold, with no
-     * durable message behind it, has to be given up on -- otherwise it waits
-     * forever, which is the state the device showed.
+     * A discard this client never saw reported is still a discard -- as long as
+     * the window can still see the moment it was admitted.
      */
     @Test
-    fun a_snapshot_that_no_longer_lists_the_row_gives_up_on_it() {
+    fun a_snapshot_whose_window_covers_the_admission_gives_up_on_the_row() {
         val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
         val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "STEERDROP")
-            .copy(admitted = true)
+            .copy(admitted = true, admittedSeq = 10)
         var state = TranscriptFold(Conversation(sessionId = "s", items = listOf(echo)))
 
-        val snapshot = FollowFrame.Snapshot(
-            cursor = 90,
-            records = emptyList(),
-            hasMore = false,
-            inbox = InboxProjection(nextTurn = emptyList(), nextStep = emptyList()),
-        )
-        state = foldFollowFrame(state, snapshot)
+        state = foldFollowFrame(state, snapshotOf(cursor = 30, records = listOf(10L, 20L, 30L)))
         assertEquals(TranscriptItem.Pending.DROPPED, echoes(state).single().failure)
     }
+
+    /**
+     * And when the window has moved past it, the row stops claiming it is on its
+     * way without claiming it was thrown away: a message delivered while this
+     * client was away looks exactly the same from here.
+     */
+    @Test
+    fun a_snapshot_whose_window_moved_past_the_admission_admits_it_cannot_tell() {
+        val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
+        val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "STEERDROP")
+            .copy(admitted = true, admittedSeq = 10)
+        var state = TranscriptFold(Conversation(sessionId = "s", items = listOf(echo)))
+
+        state = foldFollowFrame(state, snapshotOf(cursor = 90, records = listOf(50L, 70L, 90L)))
+        val row = echoes(state).single()
+        assertEquals(TranscriptItem.Pending.UNCONFIRMED, row.failure)
+        assertFalse("and it is no longer advertised as waiting", row.waiting)
+    }
+
+    /** A snapshot whose window covers the delivery retires the row as usual. */
+    @Test
+    fun a_snapshot_that_carries_the_logged_message_retires_the_row() {
+        val rpcId = "2ee42fc7-fcac-4e6c-83db-7d81c13fb1bb"
+        val echo = TranscriptItem.Pending(TranscriptItem.Pending.keyOf(rpcId), rpcId, "STEERDROP")
+            .copy(admitted = true, admittedSeq = 10)
+        var state = TranscriptFold(Conversation(sessionId = "s", items = listOf(echo)))
+
+        state = foldFollowFrame(
+            state,
+            snapshotOf(
+                cursor = 30,
+                records = listOf(10L, 20L),
+                logged = listOf(20L to rpcId),
+            ),
+        )
+        assertEquals("the message itself is on screen instead", 0, echoes(state).size)
+        assertTrue(users(state).any { it.text == "STEERDROP" })
+    }
+
+    private fun snapshotOf(
+        cursor: Long,
+        records: List<Long>,
+        logged: List<Pair<Long, String>> = emptyList(),
+    ): FollowFrame.Snapshot = FollowFrame.Snapshot(
+        cursor = cursor,
+        records = records.map { seq ->
+            val rpc = logged.firstOrNull { it.first == seq }?.second
+            SessionEvent(
+                seq = seq,
+                type = if (rpc == null) "step/start" else "user/message",
+                time = 0,
+                data = buildJsonObject {
+                    if (rpc != null) {
+                        put("id", JsonPrimitive("m-$seq"))
+                        put("content", buildJsonArray {
+                            add(buildJsonObject {
+                                put("type", JsonPrimitive("text"))
+                                put("text", JsonPrimitive("STEERDROP"))
+                            })
+                        })
+                        put("source", buildJsonObject {
+                            put("kind", JsonPrimitive("user"))
+                            put("rpcId", JsonPrimitive(rpc))
+                        })
+                    }
+                },
+            )
+        },
+        hasMore = false,
+        inbox = InboxProjection(),
+    )
 
     /** A snapshot that still lists it leaves the row waiting. */
     @Test
