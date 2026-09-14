@@ -550,6 +550,14 @@ data class SessionGroup(
 data class AppState(
     val endpoint: DshEndpoint? = null,
     val connected: Boolean = false,
+    /**
+     * Whether a client exists at all.
+     *
+     * Distinct from [connected] on purpose: a socket that is down while a client
+     * is retrying is a different thing from an app with nothing to connect to,
+     * and the header's light shows those as amber and red.
+     */
+    val attached: Boolean = false,
     val sessions: List<SessionSummary> = emptyList(),
     val conversation: Conversation? = null,
     val log: List<String> = emptyList(),
@@ -614,6 +622,13 @@ data class AppState(
      * `turn/end` arrives. Only the open turn is kept: a finished turn's figures
      * live on its row.
      */
+    /**
+     * Background jobs the Host reports, per session.
+     *
+     * Whole lists, per session, like the queues: the Host sends what a session's
+     * job registry holds, so an empty list is the removal.
+     */
+    val jobs: Map<String, List<HostJob>> = emptyMap(),
     /**
      * Messages this client has taken responsibility for delivering.
      *
@@ -750,7 +765,12 @@ internal fun AppState.withControlBaseline(snapshot: JsonObject): AppState {
         val parsed = QueueCodec.parse(items as? JsonArray)
         if (parsed.isNotEmpty()) queues[sessionId] = parsed
     }
-    return copy(metrics = this.metrics + metrics, queues = queues)
+    val jobs = mutableMapOf<String, List<HostJob>>()
+    (snapshot["jobs"] as? JsonObject)?.forEach { (sessionId, items) ->
+        val parsed = JobCodec.parse(items)
+        if (parsed.isNotEmpty()) jobs[sessionId] = parsed
+    }
+    return copy(metrics = this.metrics + metrics, queues = queues, jobs = jobs)
 }
 
 /**
@@ -884,6 +904,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     }
 
     private var client: DshClient? = null
+
+    /** Publish whether a client exists, for the header's light. */
+    private fun markAttached(value: Boolean) {
+        if (_state.value.attached != value) _state.update { it.copy(attached = value) }
+    }
     private var followJob: Job? = null
     private var eventsJob: Job? = null
     private var workspaceJob: Job? = null
@@ -898,6 +923,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private val replayedWaterfalls = mutableSetOf<String>()
 
     fun connect(endpoint: DshEndpoint) {
+        // A client from here on, so a socket that is not up yet reads as "being
+        // retried" rather than as "connected to nothing".
+        markAttached(true)
         disconnect(quiet = true)
         val created = DshClient(endpoint, scope)
         client = created
@@ -1278,6 +1306,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         _state.update { it.copy(pending = emptyList()) }
         client?.stop()
         client = null
+        markAttached(false)
         _state.update {
             it.copy(connected = false, conversation = if (quiet) it.conversation else null)
         }
@@ -1374,7 +1403,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 val usage = (snapshot["projections"] as? JsonObject)?.size ?: 0
                 val waiting = (snapshot["queues"] as? JsonObject)
                     ?.count { (it.value as? JsonArray)?.isNotEmpty() == true } ?: 0
-                record("control baseline: $usage sessions with usage, $waiting with a queue")
+                val working = (snapshot["jobs"] as? JsonObject)
+                    ?.count { (it.value as? JsonArray)?.isNotEmpty() == true } ?: 0
+                record(
+                    "control baseline: $usage sessions with usage, $waiting with a queue, $working with jobs",
+                )
             }
             // A queue frame is that session's whole queue, so an empty array is
             // the removal -- there is no per-item delta to apply.
@@ -1383,6 +1416,19 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 val items = QueueCodec.parse(obj["items"] as? JsonArray)
                 _state.update {
                     it.copy(queues = if (items.isEmpty()) it.queues - sessionId else it.queues + (sessionId to items))
+                }
+            }
+            // A jobs frame is that session's whole job list, live ones included,
+            // so an empty array is the removal -- the same shape as a queue frame.
+            "jobs" -> {
+                val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
+                val parsed = JobCodec.parse(obj["jobs"])
+                _state.update { current ->
+                    if (parsed.isEmpty()) {
+                        current.copy(jobs = current.jobs - sessionId)
+                    } else {
+                        current.copy(jobs = current.jobs + (sessionId to parsed))
+                    }
                 }
             }
             "projection" -> {

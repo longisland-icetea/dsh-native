@@ -65,6 +65,11 @@ echo "== aapt2 compile"
 # collisions (an earlier attempt) renamed the resources and broke every
 # reference to them. tools/merge-res.py merges values files element-wise and
 # copies the rest verbatim instead.
+# Assets are packaged by aapt2 too, and were missing from every APK this script
+# built until something needed one: KaTeX's files live here, and without `-A`
+# they were simply absent and the WebView rendered nothing.
+ASSETS="$ROOT/app/src/main/assets"
+
 STAGE="$OUT/res-stage"
 TREES=("$ROOT/app/src/main/res")
 if [ -f "$M2/res-dirs.txt" ]; then
@@ -103,6 +108,7 @@ SYMBOLS="$OUT/R.txt"
   --min-sdk-version 29 \
   --target-sdk-version 36 \
   --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
+  ${ASSETS:+-A "$ASSETS"} \
   "$OUT/res.zip"
 
 # ── 2. R.java ────────────────────────────────────────────────────────────────

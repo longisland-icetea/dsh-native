@@ -38,6 +38,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -128,6 +131,10 @@ internal val MUTED = Color(0xFF8A93A5)
 internal val WARN = Color(0xFFE5A06B)
 /** Session states: a turn is running, the session wants an answer, or neither. */
 internal val STATUS_RUNNING = Color(0xFF4C8DFF)
+// The connection light: green is the same green the "done" dots use, amber the
+// same amber as WARN, and red is its own -- there was no red in the palette
+// because nothing before this needed to say "nothing is coming".
+internal val STATUS_DOWN = Color(0xFFE0685F)
 internal val STATUS_ATTENTION = Color(0xFFE5A06B)
 internal val STATUS_DONE = Color(0xFF4CAF72)
 
@@ -626,6 +633,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     val scope = rememberCoroutineScope()
     var showSettings by remember { mutableStateOf(false) }
     var showModels by remember { mutableStateOf(false) }
+    var showTasks by remember { mutableStateOf(false) }
     // The full-screen zoom target. Held here rather than in AppState: it is a
     // property of this device's screen, not of the session.
     var zoomed by remember { mutableStateOf<FilePreview.Bitmap?>(null) }
@@ -702,15 +710,36 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                                 )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                // Messages the outbox is still holding are the one
-                                // thing about a weak link a reader must not have to
-                                // guess at: they were typed, and they have not
-                                // arrived. Saying so is the whole status line.
-                                Text(
-                                    text = connectionStatus(endpoint, state.connected, state.outbox.size),
-                                    fontSize = 11.sp,
-                                    color = if (state.connected && state.outbox.isEmpty()) MUTED else WARN,
+                                // A light rather than an address: the host is a
+                                // setting, not news, and what a reader needs at a
+                                // glance is whether this thing is talking to
+                                // anything right now -- and, when it is not, what it
+                                // is still holding.
+                                LinkLightDot(
+                                    light = linkLight(
+                                        endpoint = endpoint,
+                                        connected = state.connected,
+                                        attached = state.attached,
+                                    ),
                                 )
+                                linkNote(state.outbox.size)?.let { note ->
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(text = note, fontSize = 11.sp, color = WARN)
+                                }
+                                // Background work, in the space the address left:
+                                // only what is running, counted, and openable.
+                                val running = state.jobs[state.conversation?.sessionId].orEmpty().let(Jobs::live)
+                                val subagents = state.conversation?.let {
+                                    Jobs.runningSubagents(state.sessions, it.sessionId)
+                                }.orEmpty()
+                                if (running.isNotEmpty() || subagents.isNotEmpty()) {
+                                    Spacer(Modifier.width(8.dp))
+                                    RunningTasksButton(
+                                        jobs = running,
+                                        subagents = subagents,
+                                        onClick = { showTasks = true },
+                                    )
+                                }
                                 // Model and effort are the two knobs worth reaching
                                 // mid-conversation; both live behind this chip rather
                                 // than in the settings dialog, which is about the
@@ -790,6 +819,18 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
     }
     zoomed?.let { ImageZoomViewer(it, onDismiss = { zoomed = null }) }
 
+    if (showTasks) {
+        RunningTasksDialog(
+            jobs = state.jobs[state.conversation?.sessionId].orEmpty().let(Jobs::live),
+            subagents = state.conversation?.let { Jobs.runningSubagents(state.sessions, it.sessionId) }.orEmpty(),
+            onOpen = { sessionId ->
+                state.sessions.firstOrNull { it.sessionId == sessionId }?.let(holder::openSession)
+                showTasks = false
+            },
+            onDismiss = { showTasks = false },
+        )
+    }
+
     if (showModels) {
         ModelPickerDialog(
             state = state,
@@ -822,6 +863,124 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
                 }
             },
         )
+    }
+}
+
+/**
+ * What is running: background jobs, then the subagents that are working.
+ *
+ * Both are shown with the same facts in the same order -- a status word, a kind,
+ * a monospace label, a duration -- because they answer the same question ("what is
+ * this machine doing for me right now?") and a reader should not have to learn two
+ * layouts for it. A subagent row is tappable, since it has a conversation behind
+ * it; a job row is not, since it does not.
+ */
+@Composable
+private fun RunningTasksDialog(
+    jobs: List<HostJob>,
+    subagents: List<SessionSummary>,
+    onOpen: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = PANEL,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Running now", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                Spacer(Modifier.height(10.dp))
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    jobs.forEach { job ->
+                        TaskRow(
+                            status = job.status,
+                            kind = job.kind,
+                            label = job.label,
+                            trailing = Jobs.formatDuration(job.elapsedMillis()) + " · " + Jobs.statusLabel(job.status),
+                            detail = job.detail,
+                            onClick = null,
+                        )
+                    }
+                    subagents.forEach { session ->
+                        TaskRow(
+                            status = "running",
+                            kind = "agent",
+                            label = session.title,
+                            trailing = "open conversation",
+                            detail = null,
+                            onClick = { onOpen(session.sessionId) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Close") }
+            }
+        }
+    }
+}
+
+/** One line of the running list, with its longer description underneath. */
+@Composable
+private fun TaskRow(
+    status: String,
+    kind: String,
+    label: String,
+    trailing: String,
+    detail: String?,
+    onClick: (() -> Unit)?,
+) {
+    val dot = when (status) {
+        "running" -> STATUS_RUNNING
+        "stopping" -> STATUS_ATTENTION
+        "completed" -> STATUS_DONE
+        "failed" -> STATUS_DOWN
+        else -> MUTED
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick == null) Modifier else Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onClick),
+            )
+            .padding(vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(7.dp).background(dot, CircleShape))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = kind,
+                fontSize = 10.sp,
+                color = MUTED,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(CODE_BG)
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(trailing, fontSize = 10.sp, color = MUTED)
+        }
+        detail?.takeUnless { it.isBlank() }?.let { text ->
+            Text(
+                text = text,
+                fontSize = 11.sp,
+                color = MUTED,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 15.dp, top = 3.dp),
+            )
+        }
     }
 }
 
@@ -1480,6 +1639,56 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
 }
 
 /**
+ * The connection, as a light.
+ *
+ * Green for a socket that is up, amber for one being retried, red for a client
+ * that is not attached to anything at all. The three are distinguished by colour
+ * *and* by a spoken description, because a light that only a sighted reader can
+ * read is a light half the readers cannot use.
+ */
+@Composable
+private fun LinkLightDot(light: LinkLight) {
+    val (colour, description) = when (light) {
+        LinkLight.UP -> STATUS_DONE to "connected"
+        LinkLight.RECONNECTING -> STATUS_ATTENTION to "reconnecting"
+        LinkLight.DOWN -> STATUS_DOWN to "not connected"
+    }
+    Box(
+        modifier = Modifier
+            .size(9.dp)
+            .background(colour, CircleShape)
+            .semantics { contentDescription = description },
+    )
+}
+
+/**
+ * What is running: background jobs and subagents, counted, and openable.
+ *
+ * Only live work is counted -- a settled job is not something a reader needs an
+ * affordance for -- and the count is the whole point of the control, so it is the
+ * first thing the label says.
+ */
+@Composable
+private fun RunningTasksButton(jobs: List<HostJob>, subagents: List<SessionSummary>, onClick: () -> Unit) {
+    val total = jobs.size + subagents.size
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+    ) {
+        Box(Modifier.size(7.dp).background(STATUS_RUNNING, CircleShape))
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = if (total == 1) "1 running" else "$total running",
+            fontSize = 11.sp,
+            color = ACCENT,
+        )
+    }
+}
+
+/**
  * The connection line: what this client is doing about the network, in words.
  *
  * Three states, and the third is the one a weak link needs: a message that was
@@ -1836,9 +2045,23 @@ private fun TranscriptRow(
  * wants the hierarchy, not the source.
  */
 @Composable
-private fun ProseBlock(block: MarkdownBlock.Prose) {
+private fun ProseBlock(block: MarkdownBlock.Prose, streaming: Boolean = false) {
     val body = block.lines.joinToString("\n").trim('\n')
     if (body.isEmpty()) return
+    // A formula is the one thing the Compose renderer cannot draw. KaTeX can, and
+    // it is what the web client uses, so a block that carries mathematics goes
+    // through the bundled copy rather than being shown as raw TeX. While a
+    // message is still streaming it stays plain text: re-rendering a WebView per
+    // frame would flicker, and half a formula is not worth drawing.
+    if (!streaming && MathText.hasMath(block.lines)) {
+        MathBlockView(
+            lines = block.lines,
+            kind = block.kind,
+            textColor = 0xDDE2EC,
+            modifier = Modifier.padding(vertical = 2.dp),
+        )
+        return
+    }
     val (size, weight, lineHeight) = when (block.kind) {
         ProseKind.Heading1 -> Triple(19.sp, FontWeight.SemiBold, 25.sp)
         ProseKind.Heading2 -> Triple(17.sp, FontWeight.SemiBold, 23.sp)
@@ -2176,7 +2399,7 @@ private fun AssistantBubble(text: String, streaming: Boolean) {
             val blocks = remember(text) { SimpleMarkdown.parse(text) }
             blocks.forEach { block ->
                 when (block) {
-                    is MarkdownBlock.Prose -> ProseBlock(block)
+                    is MarkdownBlock.Prose -> ProseBlock(block, streaming)
                     is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
                     is MarkdownBlock.Table -> TableBlock(block)
                     MarkdownBlock.Rule -> HorizontalDivider(
