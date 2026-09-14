@@ -24,9 +24,22 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v4
+      # Not `android-actions/setup-android`: the runner image now ships
+      # cmdline-tools 20, whose `sdkmanager` no longer has a `tools` package --
+      # and that action installs it unconditionally, so it fails before anything
+      # is built. The image already provides the SDK; what is missing is the
+      # command-line tools on PATH and the platform this project compiles against.
+      - name: Android SDK
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          tools="$(find "$sdk/cmdline-tools" -maxdepth 2 -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)"
+          test -x "$tools" || { echo "no sdkmanager under $sdk/cmdline-tools"; exit 1; }
+          echo "PATH=$(dirname "$tools"):$sdk/platform-tools:$PATH" >> "$GITHUB_ENV"
+          yes | "$tools" --licenses >/dev/null 2>&1 || true
       - name: Install Android API 36
-        run: sdkmanager "platforms;android-36"
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - uses: gradle/actions/setup-gradle@v6
       # The version both build paths stamp comes from a shell script, so the
       # shell tests run before the Gradle ones: a broken derivation there fails
@@ -65,9 +78,22 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v4
+      # Not `android-actions/setup-android`: the runner image now ships
+      # cmdline-tools 20, whose `sdkmanager` no longer has a `tools` package --
+      # and that action installs it unconditionally, so it fails before anything
+      # is built. The image already provides the SDK; what is missing is the
+      # command-line tools on PATH and the platform this project compiles against.
+      - name: Android SDK
+        run: |
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          tools="$(find "$sdk/cmdline-tools" -maxdepth 2 -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)"
+          test -x "$tools" || { echo "no sdkmanager under $sdk/cmdline-tools"; exit 1; }
+          echo "PATH=$(dirname "$tools"):$sdk/platform-tools:$PATH" >> "$GITHUB_ENV"
+          yes | "$tools" --licenses >/dev/null 2>&1 || true
       - name: Install Android API 36
-        run: sdkmanager "platforms;android-36"
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - uses: gradle/actions/setup-gradle@v6
       - name: Detect signing secrets
         id: signing
