@@ -405,8 +405,19 @@ sealed interface TranscriptItem {
 sealed interface FilePreview {
     val path: String
 
-    /** UTF-8 text, shown as a selectable monospace block. */
-    data class Text(override val path: String, val body: String) : FilePreview
+    /**
+     * UTF-8 text. A Markdown document is laid out the way a transcript message
+     * is; anything else is shown as the source it is.
+     *
+     * [truncated] is the Host saying it stopped at its page cap rather than at
+     * the end of the file. The sheet marks it, because a cut page with no
+     * marker reads exactly like a complete document.
+     */
+    data class Text(
+        override val path: String,
+        val body: String,
+        val truncated: Boolean = false,
+    ) : FilePreview
 
     /**
      * An image, decoded from the Host's raw bytes.
@@ -1783,7 +1794,9 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      */
     private suspend fun readPreview(active: DshClient, sessionId: String, path: String): FilePreview {
         val asText = runCatching { active.readWorkspaceFile(sessionId, path) }
-        asText.getOrNull()?.let { return FilePreview.Text(path, it) }
+        asText.getOrNull()?.let {
+            return FilePreview.Text(path, it.text, truncated = it.truncated)
+        }
         val textFailure = asText.exceptionOrNull()?.message.orEmpty()
         if (!textFailure.contains("not-text")) {
             return FilePreview.Failed(path, explainReadFailure(textFailure))
@@ -1826,6 +1839,13 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             "This file is neither text nor an image this build can draw, so there is nothing to show here."
         message.contains("not-found") ->
             "The Host cannot find this path. It may have been moved or deleted since the turn that produced it."
+        // The read is capped at the deployment's page size, and the cap is a
+        // refusal rather than a cut, so a very large file -- or one whose bytes
+        // are a single enormous line -- arrives here with nothing read at all.
+        // Measured: a 3 MiB one-line file fails with exactly this code.
+        message.contains("too-large") ->
+            "This file is larger than the Host will read in one page, so there is nothing to show here. " +
+                "Open it on the host at the path above."
         else -> message
     }
 

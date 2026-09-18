@@ -20,7 +20,7 @@ Column meanings:
 | `tool/call` | tool card with arguments | the one line that makes a tool-heavy turn scannable |
 | `tool/result` | folded into its call | a separate row doubles every tool's height |
 | `todo/write` | todo card | the plan is the most useful thing to re-read mid-turn |
-| `deliverables/presented` | deliverables card | the whole point of a turn is what it produced |
+| `deliverables/presented` | deliverables card, each row opening a preview | the whole point of a turn is what it produced |
 | `model/selection` | model chip | answers "which model is this" without opening settings |
 | `turn/end` | note when it carries a reason | a failed turn otherwise ends silently |
 | `compaction/*` | compaction boundary note | the transcript has no other marker that history was summarized away |
@@ -73,8 +73,10 @@ pending-interaction path instead.
 
 `app/src/test/java/.../EventDecodeTest.kt` pins the decoders for this table,
 using payloads copied from a live capture. `SimpleMarkdownTest` does the same for
-the rendering of assistant text. `./tools/run-jvm-tests.sh` runs both locally and
-Gradle runs them in CI.
+the rendering of assistant text, and `WorkspaceFilePageTest` +
+`DeliverableViewTest` for the page a deliverable read returns and the document it
+becomes. `./tools/run-jvm-tests.sh` runs all of them locally and Gradle runs them
+in CI.
 
 A decoder test written from an invented payload is how the first `turn/end` bug
 survived review: the fixture claimed a completed turn carried

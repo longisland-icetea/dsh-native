@@ -406,6 +406,59 @@ data class SessionSummary(
 }
 
 /**
+ * One page of a text file, as `workspaceFiles/read` answers.
+ *
+ * [eof] is the field that makes this a *page* rather than a file. The endpoint
+ * cuts a read at the deployment's line cap (5000 by default, measured: a
+ * 7000-line file came back as `lines: 5000, eof: false`), and a reader shown
+ * that page without knowing it is a page believes it has read the document.
+ *
+ * [truncated] is [eof]'s counterpart for content that has no last line to
+ * reach: a file whose bytes are one enormous line is refused as `too-large`
+ * rather than cut, and a page that fills the byte cap before reaching the end
+ * is the same loss by another route.
+ */
+data class WorkspaceFilePage(
+    val text: String,
+    /** Whether this page reaches the file's last line. */
+    val eof: Boolean = true,
+    /** Whether the page stopped short of the end for any reason. */
+    val truncated: Boolean = false,
+    /** Lines on this page, as the Host counted them; null when it did not say. */
+    val lines: Int? = null,
+)
+
+/**
+ * Decode `workspaceFiles/read` by hand, for the same reason `session/list` is
+ * hand-decoded: the result carries fields this client does not render (the
+ * version token, the byte count) and more may arrive, so a strict serializer
+ * would turn an unrelated addition into a failed read.
+ *
+ * A missing `text` key is refused rather than read as an empty string: the Host
+ * omits it for a page holding one empty line, and it also omits it when the
+ * result is not the shape this client thinks it is. Reporting "empty file" for
+ * a payload that carried no text at all is the failure mode worth avoiding.
+ */
+object WorkspaceFileCodec {
+    fun readPage(value: JsonElement): WorkspaceFilePage? {
+        // A safe cast, not an unchecked one: this decodes an untrusted payload,
+        // and the caller reads null as "the result was not a page".
+        val obj = value as? JsonObject ?: return null
+        val text = (obj["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+        val eof = (obj["eof"] as? JsonPrimitive)?.booleanOrNull
+        return WorkspaceFilePage(
+            text = text,
+            // A page with no `eof` is a page from a Host that does not send one;
+            // treating that as complete is the same as the old behaviour, and
+            // guessing "truncated" would put a lie on every read.
+            eof = eof ?: true,
+            truncated = eof == false,
+            lines = (obj["lines"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull(),
+        )
+    }
+}
+
+/**
  * Decode `session/list` by hand.
  *
  * A generated serializer is the wrong tool here: `projections.values` holds

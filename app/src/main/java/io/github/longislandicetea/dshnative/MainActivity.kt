@@ -360,7 +360,20 @@ private fun ModelPickerDialog(
     )
 }
 
-/** A tap-opened preview of one deliverable, read through the Host. */
+/**
+ * What a text page stopped short of the end says.
+ *
+ * The Host cuts a read at its page cap, and the reader has to be told: a page
+ * that ends mid-sentence with no marker reads as a document that ends there.
+ */
+private const val TRUNCATION_NOTICE = "… first page only; the Host did not send the whole file"
+
+/**
+ * A tap-opened preview of one deliverable, read through the Host.
+ *
+ * The view is chosen by the delivered path, not by what came back, so a file
+ * that fails to read is still described as the kind of thing it is.
+ */
 @Composable
 private fun FilePreviewDialog(
     preview: FilePreview?,
@@ -369,6 +382,10 @@ private fun FilePreviewDialog(
     onZoom: (FilePreview.Bitmap) -> Unit,
 ) {
     if (preview == null && loading == null) return
+    // Held across the loading state: the path is known before the read answers,
+    // so the sheet does not change shape when the bytes arrive.
+    val viewPath = preview?.path ?: loading.orEmpty()
+    val view = remember(viewPath) { deliverableViewFor(viewPath) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -399,20 +416,53 @@ private fun FilePreviewDialog(
                 is FilePreview.Bitmap -> ImagePreview(preview) { onZoom(preview) }
                 is FilePreview.Text -> {
                     val body = preview.body
-                    if (body.isEmpty()) {
+                    // A document's body is what is left after its own metadata
+                    // is stripped, and a file that is nothing but front matter
+                    // leaves nothing -- which the sheet has to say rather than
+                    // showing a blank page.
+                    val document = if (view == DeliverableView.Document) {
+                        deliverableDocumentText(body)
+                    } else {
+                        null
+                    }
+                    if ((document ?: body).isBlank()) {
                         Text("(empty file)", color = MUTED, fontSize = 12.sp)
                         return@AlertDialog
                     }
-                    Column(
-                        Modifier
-                            .verticalScroll(rememberScrollState())
-                            .horizontalScroll(rememberScrollState()),
-                    ) {
-                        // One selectable block: a preview is for reading and
-                        // copying, and markdown rendering would hide the source the
-                        // model wrote.
-                        SelectionContainer {
-                            Text(body, color = Color(0xFFB9C1CE), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        if (preview.truncated) {
+                            Text(
+                                text = TRUNCATION_NOTICE,
+                                color = WARN,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                        }
+                        // A Markdown deliverable *is* a document, so it is laid
+                        // out the way one is -- by the same renderer a message
+                        // goes through -- and the reader gets a report rather
+                        // than a wall of `##` and `**`. Everything else stays
+                        // source, which is what a source file is for.
+                        if (document != null) {
+                            MarkdownBody(document)
+                        } else {
+                            // Horizontal scroll belongs to the source view only:
+                            // a document with a long line should wrap, and a
+                            // wrapped line of source loses its indentation,
+                            // which is the part that carries the structure.
+                            Box(Modifier.horizontalScroll(rememberScrollState())) {
+                                // One selectable block: source is for reading
+                                // and copying, and rendering it would hide what
+                                // the model actually wrote.
+                                SelectionContainer {
+                                    Text(
+                                        body,
+                                        color = Color(0xFFB9C1CE),
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -2396,21 +2446,34 @@ private fun AssistantBubble(text: String, streaming: Boolean) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp)) {
-            val blocks = remember(text) { SimpleMarkdown.parse(text) }
-            blocks.forEach { block ->
-                when (block) {
-                    is MarkdownBlock.Prose -> ProseBlock(block, streaming)
-                    is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
-                    is MarkdownBlock.Table -> TableBlock(block)
-                    MarkdownBlock.Rule -> HorizontalDivider(
-                        Modifier.padding(vertical = 6.dp),
-                        color = Color(0xFF2A2F38),
-                    )
-                }
-            }
+            MarkdownBody(text, streaming)
             if (streaming) {
                 Text("▍", color = ACCENT, fontSize = 14.sp)
             }
+        }
+    }
+}
+
+/**
+ * The app's Markdown rendering, over text from anywhere.
+ *
+ * Split out of the assistant bubble so that the message path and the document
+ * path draw a Markdown file with the same code. They are the same bytes and the
+ * same syntax; two renderers would be two chances to disagree, and the one the
+ * reader sees less often would be the one that rots.
+ */
+@Composable
+private fun MarkdownBody(text: String, streaming: Boolean = false) {
+    val blocks = remember(text) { SimpleMarkdown.parse(text) }
+    blocks.forEach { block ->
+        when (block) {
+            is MarkdownBlock.Prose -> ProseBlock(block, streaming)
+            is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
+            is MarkdownBlock.Table -> TableBlock(block)
+            MarkdownBlock.Rule -> HorizontalDivider(
+                Modifier.padding(vertical = 6.dp),
+                color = Color(0xFF2A2F38),
+            )
         }
     }
 }

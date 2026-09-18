@@ -30,8 +30,10 @@ Checked, and not gaps:
 - Approvals: allow once / reject, with the asker's reason.
 - Questions: the full one-question-at-a-time pager, per-question skip, custom
   text, plan-review classification, validation, and the exact answer payload.
-- Deliverable preview, image zoom, jump-to-newest, Load older, transport log,
-  new-session button, reconnect and resubscribe.
+- Deliverable preview: a Markdown deliverable is laid out as a document by the
+  same renderer a transcript message uses, anything else as source, and a page
+  the Host cut short says so; image zoom, jump-to-newest, Load older, transport
+  log, new-session button, reconnect and resubscribe.
 - Token usage, context pressure with its breakdown, the pending-message queue
   with steer/edit/remove, and the `/` command menu built from `commands/list`.
 - A sent message is on screen before the Host has read it, the way the web's
@@ -179,10 +181,17 @@ Worth stating so they are not mistaken for omissions:
 - **Right sidebar and layout.** Files tab, document preview tabs, split panes,
   floating panes, drag-resizable columns, Open-In-App. These are desktop
   affordances; the app's full-screen conversation with a drawer is the mobile
-  equivalent, and its own file preview covers the common case.
+  equivalent, and its own file preview covers the common case. The document
+  preview itself is aligned as far as rendering goes — the web's is the same
+  `MarkdownText` primitive a message goes through, and so is this one's — but not
+  as far as paging: the web's viewer accumulates pages and offers "Load more"
+  while `eof` is false, where this app reads one page per tap and marks a page
+  the Host cut short.
 - **Markdown.** The app's renderer is a deliberate hand-written subset (no
-  footnotes, no math, no task-list checkboxes). Rendered LaTeX on a phone is of
-  limited value; footnotes and checkboxes are cheap to add if they are missed.
+  footnotes, no task-list checkboxes, no definition lists). Mathematics is *not*
+  a gap: a block carrying it goes through a bundled KaTeX in a WebView, the same
+  renderer the web client uses. Footnotes and checkboxes are cheap to add if they
+  are missed.
 - **Settings schema.** The web's settings UI is generated from a Host schema, so
   third-party namespaces appear without client changes. The app has no settings
   renderer, which is why every settings surface is a separate feature here.

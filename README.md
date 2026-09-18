@@ -56,7 +56,9 @@ trust.
   fold in their results, background-job notices as cards, and a follow-the-newest
   behaviour that only follows while you are at the bottom.
 - **The plan and the output**: `todo/write` renders as a checklist, and files a turn
-  presents open in a preview — text inline, images full screen with pinch-to-zoom.
+  presents open in a preview — a Markdown deliverable laid out as a document the
+  way a transcript message is, anything else as selectable source, and images full
+  screen with pinch-to-zoom.
 - **Control**: send prompts, cancel a running turn, switch model and reasoning
   effort, run `/compact`, answer approvals and questions the Host asks, and create
   sessions either in a chosen workspace or in the default directory.
@@ -132,6 +134,7 @@ and how the rejected outline was caught.
 | `app/src/main/java/.../AppState.kt` | state holder, event → transcript reducer, actions |
 | `app/src/main/java/.../MainActivity.kt` | Compose UI |
 | `app/src/main/java/.../SimpleMarkdown.kt` | hand-written Markdown subset |
+| `app/src/main/java/.../DeliverableView.kt` | which deliverable opens as a document, and what it shows |
 | `app/src/main/java/.../CodeHighlight.kt` | hand-written syntax highlighting |
 | `docs/event-coverage.md` | every session event type, and how each is rendered |
 | `docs/design-notes.md` | why the app works the way it does, one note per change |

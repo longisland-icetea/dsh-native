@@ -876,3 +876,69 @@ sizing the layer by its height instead would let a wide monogram run past it, an
 square mask simulation confirmed nothing is clipped. `--export` writes the README's
 previews from the same code that writes the icons, so the documented mark cannot
 drift from the shipped one.
+
+## Render a delivered Markdown file the way a message is rendered
+
+The preview sheet drew every text deliverable as monospace source, on the
+argument that "markdown rendering would hide the source the model wrote". That
+argument is sound for a source file and wrong for a document, and the difference
+is not cosmetic: a turn whose deliverable is a report was handing the reader
+`## Findings` and `| a | b |` where the harness's own message path — and the web
+client's document preview, which registers exactly `extensions: ["md",
+"markdown"]` — hands them a heading and a table. Same file, same protocol, two
+renderers.
+
+The sheet now chooses by extension (`deliverableViewFor`), and a document goes
+through `MarkdownBody`, which is the assistant bubble's rendering lifted into a
+function so both paths cannot drift apart. Front matter is stripped first
+(`deliverableDocumentText`): model-written reports routinely open with a YAML
+block, and rendered as Markdown its `---` becomes a horizontal rule and its
+fields become a paragraph of keys. Only a block that closes is stripped, because
+a document that opens with an unclosed `---` is a document starting with a rule.
+
+### The page cap was invisible, and that is what made it worth fixing
+
+`workspaceFiles/read` does not return a file. It returns a *page*, cut at the
+deployment's line and byte caps (5000 lines, 2 MiB by default), and it says so in
+`eof`. The app read only `text` and drew it as the document — so a 7000-line
+deliverable arrived as 5000 lines with no marker, and the reader had no way to
+tell that from a file that ends there. Measured against a live Host: a 7000-line
+file answers `lines: 5000, eof: false`.
+
+The decoder (`WorkspaceFileCodec`) and the state now carry `eof` through to the
+sheet, which marks a cut page. The `too-large` refusal — a file whose bytes are
+one enormous line gets no page at all — gained copy that says so instead of
+falling through to the wire's own error text.
+
+Continuing the document would be the better answer, and the web's viewer does
+exactly that: it accumulates pages and offers "Load more" while `eof` is false.
+This app reads one page per tap. The paging is the next step rather than part of
+this change, because it needs a page cursor in the sheet's state and a way to
+report *which* page the reader is on; saying "this is not the whole file" is the
+part that could not wait, since without it the reader cannot tell a cut page from
+a short document at all.
+
+Two smaller things came out of the same pass. The read result was decoded with an
+unchecked cast, which would throw on a payload that is not an object; it is a
+safe cast now, and a missing `text` key is refused rather than read as an empty
+file — "empty file" is the wrong story for a result this client did not
+understand. And `docs/web-parity.md`'s claim that the app's Markdown renderer has
+"no math" was already stale: `MathBlockView` has been rendering KaTeX since the
+formula work landed.
+
+### What is tested where
+
+The rules are pure and unit tested (26 cases across `DeliverableViewTest` and
+`WorkspaceFilePageTest`), with the payloads captured from a live Host rather than
+written by hand — the 7000-line capture is the one that found the bug. Three of
+those tests failed on the first run and every one was real: `.md` used as a
+*filename* was being read as an extension, a front-matter scan that did not stop
+at a blank line deleted everything up to the document's next `---`, and the test
+helper's own cast was hiding what the decoder does with a non-object payload.
+
+The layout is not unit-testable, so `tools/live-harness.sh` gained four checks
+that drive the real `DshClient` against a running Host: a Markdown deliverable
+reads whole, lays out as a heading plus a table, a source deliverable stays
+source, and a 6000-line file comes back marked truncated. All four pass against
+the live Host. They run before the harness's turn, so a failure there does not
+spend model quota.

@@ -640,22 +640,27 @@ class DshClient(
 
     /** Every routable provider, its models, and their reasoning efforts. */
     /**
-     * Read one text file through the Host, for the deliverable preview.
+     * Read one page of a text file through the Host, for the deliverable preview.
      *
      * The argument names come from the endpoint descriptor: the scope is
      * `workspaceFileScopeId` (not `workspaceFileScope`, which the wire rejects),
      * and `range` is required even though it may be empty -- omitting it fails
      * with `gateway/arguments-invalid`.
+     *
+     * The result is the whole page rather than its text, because the text alone
+     * cannot say whether the Host reached the end of the file. It frequently
+     * does not: the read is cut at 5000 lines and 2 MiB by deployment default,
+     * and a reader shown a cut page with no marker has no way to tell it from a
+     * complete document.
      */
-    suspend fun readWorkspaceFile(sessionId: String, path: String): String {
+    suspend fun readWorkspaceFile(sessionId: String, path: String): WorkspaceFilePage {
         val args = buildJsonObject {
             put("workspaceFileScopeId", sessionId)
             put("path", path)
             put("range", buildJsonObject { })
         }
         val value = call("workspaceFiles/read", args)
-        val obj = value as? JsonObject ?: throw DshException("read: unexpected result")
-        return obj["text"]?.jsonPrimitive?.contentOrNull
+        return WorkspaceFileCodec.readPage(value)
             ?: throw DshException("read: no text in result")
     }
 

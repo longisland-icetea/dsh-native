@@ -95,6 +95,69 @@ fun main(args: Array<String>): Unit = runBlocking {
     ).also { it.start() }
     holder.connect(endpoint)
 
+    // The deliverable read path, end to end: this is the same `DshClient` call
+    // the preview sheet makes, so it covers the wire, the page decode and the
+    // document rule together. It reads only files this harness made itself.
+    suspend fun checkDeliverableReads(sessionId: String) {
+        val scratch = java.nio.file.Files.createTempDirectory("dsh-deliverable")
+        val document = scratch.resolve("audit.md")
+        val source = scratch.resolve("client.kt")
+        // Long enough to overrun the Host's page cap, which is the case the
+        // reader cannot otherwise tell from a complete document.
+        val long = scratch.resolve("long.md")
+        java.nio.file.Files.write(
+            document,
+            "---\ntitle: Weekly audit\n---\n\n# Findings\n\n| a | b |\n|---|---|\n| 1 | 2 |\n".toByteArray(),
+        )
+        java.nio.file.Files.write(source, "package example\n\nfun main() {}\n".toByteArray())
+        java.nio.file.Files.write(
+            long,
+            StringBuilder().also { out -> repeat(6_000) { out.append("line ").append(it).append('\n') } }.toString().toByteArray(),
+        )
+
+        val markdown = runCatching { direct.readWorkspaceFile(sessionId, document.toString()) }
+        val page = markdown.getOrNull()
+        run {
+            if (page == null) {
+                report.check(
+                    "a delivered markdown file reads as one page",
+                    false,
+                    markdown.exceptionOrNull()?.message.orEmpty(),
+                )
+                return@run
+            }
+            val blocks = SimpleMarkdown.parse(deliverableDocumentText(page.text))
+            report.check(
+                "a delivered markdown file reads as one page",
+                DeliverableView.Document == deliverableViewFor(document.toString()) && page.eof && !page.truncated,
+                "eof=${page.eof} truncated=${page.truncated}",
+            )
+            // The front matter is gone *and* what is left is laid out: a
+            // heading and a table, not a paragraph of `#` and pipes.
+            report.check(
+                "a markdown deliverable is laid out, not shown as source",
+                blocks.any { it is MarkdownBlock.Prose && it.kind == ProseKind.Heading1 } &&
+                    blocks.any { it is MarkdownBlock.Table },
+                blocks.joinToString(",") { it::class.simpleName.orEmpty() },
+            )
+        }
+        val code = runCatching { direct.readWorkspaceFile(sessionId, source.toString()) }
+        report.check(
+            "a source deliverable stays source",
+            code.getOrNull()?.text?.startsWith("package example") == true &&
+                DeliverableView.Source == deliverableViewFor(source.toString()),
+        )
+        val cut = runCatching { direct.readWorkspaceFile(sessionId, long.toString()) }
+        // The whole point: the Host answers a request for a whole file with a
+        // page, and this client can now say so instead of drawing it as the file.
+        report.check(
+            "a page cut at the host's cap is reported as truncated",
+            cut.getOrNull()?.truncated == true && cut.getOrNull()?.eof == false,
+            "lines=${cut.getOrNull()?.lines} truncated=${cut.getOrNull()?.truncated}",
+        )
+        java.nio.file.Files.walk(scratch).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) }
+    }
+
     // `SessionGroup.fromWorkspaces` is the drawer's own rule -- origin, archive
     // and blank -- so a check through it is a check on what a reader would see,
     // not merely on what the state holds.
@@ -140,6 +203,10 @@ fun main(args: Array<String>): Unit = runBlocking {
         val session = until("a new session") { holder.state.value.conversation?.sessionId }
         sessionId = session
         println("   throwaway session: $session")
+
+        // Runs before the turn, so a failure here does not cost the model quota
+        // the rest of the run spends.
+        checkDeliverableReads(session)
 
         val snapshot = until("the follow snapshot") {
             holder.state.value.conversation?.takeIf { it.items.isNotEmpty() || it.throughSeq > 0 }
