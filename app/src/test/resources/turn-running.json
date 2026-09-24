@@ -1,0 +1,750 @@
+{
+ "note": "One real turn against a live Host: a tool call, then the reply. Both streams the app opens, in arrival order, so the interleaving of api-session/status with the durable frames can be replayed offline. Captured by tools/capture-turn.mjs.",
+ "sessionId": "session-4f0fee6f-6fc3-4990-8577-1d185e2204e1",
+ "prompt": "Run bash: sleep 12 — then reply with the single word PINEAPPLE.",
+ "requestId": "2c742c78-0424-498e-b035-ffc95662b671",
+ "frames": [
+  {
+   "at": 52,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "snapshot",
+    "header": {
+     "version": 3,
+     "id": "session-4f0fee6f-6fc3-4990-8577-1d185e2204e1",
+     "createdAt": 1790204955248,
+     "cwd": "/home/cxxiao",
+     "isSeeded": false,
+     "agentPreset": "academic"
+    },
+    "cursor": 3,
+    "records": [
+     {
+      "type": "event",
+      "event": {
+       "type": "permission/preset",
+       "seq": 0,
+       "time": 1790204955256,
+       "data": {
+        "preset": "danger-full-access"
+       }
+      }
+     },
+     {
+      "type": "event",
+      "event": {
+       "type": "sandbox/mode",
+       "seq": 1,
+       "time": 1790204955256,
+       "data": {
+        "mode": "danger-full-access"
+       }
+      }
+     },
+     {
+      "type": "event",
+      "event": {
+       "type": "approval/policy",
+       "seq": 2,
+       "time": 1790204955256,
+       "data": {
+        "policy": "never"
+       }
+      }
+     },
+     {
+      "type": "event",
+      "event": {
+       "type": "subagent/model-selection-policy",
+       "seq": 3,
+       "time": 1790204955257,
+       "data": {
+        "allowedModels": [
+         {
+          "provider": "workbuddy",
+          "model": "hy4-preview"
+         },
+         {
+          "provider": "workbuddy",
+          "model": "glm-5.3-flash"
+         },
+         {
+          "provider": "workbuddy",
+          "model": "glm-5.3"
+         },
+         {
+          "provider": "deepseek-official",
+          "model": "deepseek-flash"
+         }
+        ]
+       }
+      }
+     }
+    ],
+    "hasMore": false,
+    "projections": {
+     "asOfSeq": 3,
+     "values": {
+      "title": null,
+      "goal": null,
+      "tokenUsage": {
+       "uncachedInputTokens": 0,
+       "outputTokens": 0,
+       "cacheReadTokens": 0,
+       "cacheWriteTokens": 0
+      },
+      "contextPressure": {},
+      "contextBreakdown": {
+       "systemTokens": 0,
+       "toolsTokens": 0,
+       "messageTokens": 0
+      },
+      "sessionStats": {
+       "turns": 0,
+       "steps": 0,
+       "llmMs": 0,
+       "toolMs": 0,
+       "ttftMs": 0,
+       "ttftSteps": 0,
+       "decodeMs": 0,
+       "decodeTokens": 0
+      },
+      "turnOutline": [],
+      "agentPreset": "academic",
+      "subagentCatalog": [],
+      "subagentTiming": {
+       "settledMs": 0
+      },
+      "subagent": null,
+      "permissions": {
+       "options": [
+        {
+         "value": "read-only",
+         "name": "read-only"
+        },
+        {
+         "value": "workspace-write",
+         "name": "workspace-write"
+        },
+        {
+         "value": "danger-full-access",
+         "name": "danger-full-access"
+        }
+       ],
+       "currentValue": "danger-full-access"
+      },
+      "modelSelection": {
+       "lastUsed": null,
+       "next": null
+      },
+      "sessionListMetadata": {
+       "blank": true,
+       "lastPromptAt": null
+      },
+      "imageLimits": {
+       "maxImageBytes": 20971520,
+       "maxImagesPerMessage": 20,
+       "maxMessageImageBytes": 209715200,
+       "maxImagePixels": 64000000,
+       "maxImageDimension": 8192,
+       "mediaTypes": [
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif"
+       ]
+      },
+      "inbox": {
+       "next-turn": [],
+       "next-step": []
+      },
+      "todos": null,
+      "plan": {
+       "active": false,
+       "pending": false
+      }
+     }
+    },
+    "assistantStream": {
+     "revision": 0
+    }
+   }
+  },
+  {
+   "at": 1263,
+   "stream": "events",
+   "kind": "emit",
+   "event": "api-session/status",
+   "args": [
+    "session-4f0fee6f-6fc3-4990-8577-1d185e2204e1",
+    true
+   ]
+  },
+  {
+   "at": 1263,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "turn/start",
+     "seq": 5,
+     "time": 1790204956481,
+     "data": {
+      "turn": 1
+     }
+    }
+   }
+  },
+  {
+   "at": 1287,
+   "stream": "events",
+   "kind": "emit",
+   "event": "api-session/activity",
+   "args": [
+    "session-4f0fee6f-6fc3-4990-8577-1d185e2204e1",
+    1790204956504
+   ]
+  },
+  {
+   "at": 1287,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "user/message",
+     "seq": 9,
+     "time": 1790204956504,
+     "data": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Run bash: sleep 12 — then reply with the single word PINEAPPLE."
+       }
+      ],
+      "source": {
+       "kind": "user",
+       "rpcId": "2c742c78-0424-498e-b035-ffc95662b671"
+      },
+      "role": "user",
+      "id": "e0383767-712b-4294-b3c5-eb47543d0344"
+     },
+     "surfaceOp": "append"
+    }
+   }
+  },
+  {
+   "at": 1287,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "user/message",
+     "seq": 10,
+     "time": 1790204956504,
+     "data": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.\n\nApproval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`).\n\n\n\n---\n\n**研究记忆**：本项目已有持久记忆（已读论文的笔记、关键发现、主题索引）。检索或精读之前先查：`academic_paper_list`（已入库论文清单）、`academic_memory_recall`（按 paper_id / 主题取笔记与全文），避免重复导入；跨论文结论用 `academic_memory_update` 记录。"
+       }
+      ],
+      "source": {
+       "kind": "plugin",
+       "plugin": "@deepseek-ai/dsh-system-prompt",
+       "form": "snapshot",
+       "sections": [
+        {
+         "name": "sandbox:policy",
+         "text": "Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations."
+        },
+        {
+         "name": "approval:policy",
+         "text": "Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`)."
+        },
+        {
+         "name": "academic:working-memory",
+         "text": "\n\n---\n\n**研究记忆**：本项目已有持久记忆（已读论文的笔记、关键发现、主题索引）。检索或精读之前先查：`academic_paper_list`（已入库论文清单）、`academic_memory_recall`（按 paper_id / 主题取笔记与全文），避免重复导入；跨论文结论用 `academic_memory_update` 记录。"
+        }
+       ]
+      },
+      "role": "user",
+      "id": "408d53dd-8ab9-4611-8321-9abad7f712b6"
+     },
+     "surfaceOp": "append"
+    }
+   }
+  },
+  {
+   "at": 1287,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "user/message",
+     "seq": 11,
+     "time": 1790204956504,
+     "data": {
+      "content": [
+       {
+        "type": "text",
+        "text": "<system-reminder>\nA skill is a reusable set of task-specific instructions. The following skills are available in this session:\n\n<available_skills>\n- `academic-grant-writing`: Grant proposal writing for Chinese academic contexts — outline, section-by-section body text (立项依据、研究目标与内容、研究方案、创新点、研究基础), reference integration, quality self-review. Use for a grant proposal (基金申请书), project application (项目申报书) or research plan, especially NSFC youth/surface/key projects. Trigger words include 基金、申请书、项目申报、立项依据.\n- `academic-paper-writing`: Academic paper writing from outline to final draft — IMRaD and Literature Review, bilingual abstracts, LaTeX (.tex) with BibTeX resolved from DOI, compiled by latexmk. Use to write, outline, revise, abstract or quality-check a paper (写论文、学术论文、论文大纲、写摘要、修改论文). For a quick markdown review without LaTeX use academic-search; for a grant proposal use academic-grant-writing.\n- `academic-search`: Academic literature search and review — finds papers, reads them, and synthesizes a cited review. Use for literature discovery (查文献、找文献), a literature review or survey (文献综述、文献调研), or a written answer that must be grounded in published literature. Do NOT use for ordinary technical or coding questions answerable from the repo, docs or general knowledge. For a LaTeX paper or a grant proposal use academic-paper-writing / academic-grant-writing instead.\n- `hardworking-paper-writer`: Revise an academic paper sentence by sentence with the author, stripping AI writing tells while preserving their own voice. Use when the user wants to polish, tighten, proofread or de-slop a paper, draft, abstract or thesis chapter — careful interactive sentence-level revision, not a one-shot rewrite. Triggers: 改论文, 润色, 去AI味, \"help me revise my paper\", \"go through my abstract line by line\". Needs a .tex/.md/.txt source.\n- `paper-review-helper`: Copilot for peer review of someone else's paper. Use when reviewing a research paper (PDF/LaTeX) — section-by-section analysis, a classified issue log, inline problem markers, decision support, and a structured review response (REVIEW.md). For reviewing YOUR OWN draft against your own questions, use academic_review_draft instead.\n- `research-slide`: Turn a research figure or result into a Chinese defense/report slide (答辩/组会/项目汇报) as beamer + LaTeX, compiled to PDF. Triggers: 做成答辩ppt, 把这张图做成幻灯片, 组会/答辩/汇报用的slide, research highlight slide, 把figure X重新组织成一页, 按这个模版做. Optimized for physics/materials/quantum figures. Restrained navy/red style: statement banner, two-column argument, boxed conclusion. For the paper body itself use academic-paper-writing.\n</available_skills>\n\nIf the user names a skill, or the task clearly matches a skill's description, call the `skill` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.\nA user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.\n</system-reminder>"
+       }
+      ],
+      "source": {
+       "kind": "skill-catalog",
+       "form": "catalog",
+       "entries": [
+        {
+         "name": "academic-grant-writing",
+         "description": "Grant proposal writing for Chinese academic contexts — outline, section-by-section body text (立项依据、研究目标与内容、研究方案、创新点、研究基础), reference integration, quality self-review. Use for a grant proposal (基金申请书), project application (项目申报书) or research plan, especially NSFC youth/surface/key projects. Trigger words include 基金、申请书、项目申报、立项依据."
+        },
+        {
+         "name": "academic-paper-writing",
+         "description": "Academic paper writing from outline to final draft — IMRaD and Literature Review, bilingual abstracts, LaTeX (.tex) with BibTeX resolved from DOI, compiled by latexmk. Use to write, outline, revise, abstract or quality-check a paper (写论文、学术论文、论文大纲、写摘要、修改论文). For a quick markdown review without LaTeX use academic-search; for a grant proposal use academic-grant-writing."
+        },
+        {
+         "name": "academic-search",
+         "description": "Academic literature search and review — finds papers, reads them, and synthesizes a cited review. Use for literature discovery (查文献、找文献), a literature review or survey (文献综述、文献调研), or a written answer that must be grounded in published literature. Do NOT use for ordinary technical or coding questions answerable from the repo, docs or general knowledge. For a LaTeX paper or a grant proposal use academic-paper-writing / academic-grant-writing instead."
+        },
+        {
+         "name": "hardworking-paper-writer",
+         "description": "Revise an academic paper sentence by sentence with the author, stripping AI writing tells while preserving their own voice. Use when the user wants to polish, tighten, proofread or de-slop a paper, draft, abstract or thesis chapter — careful interactive sentence-level revision, not a one-shot rewrite. Triggers: 改论文, 润色, 去AI味, \"help me revise my paper\", \"go through my abstract line by line\". Needs a .tex/.md/.txt source."
+        },
+        {
+         "name": "paper-review-helper",
+         "description": "Copilot for peer review of someone else's paper. Use when reviewing a research paper (PDF/LaTeX) — section-by-section analysis, a classified issue log, inline problem markers, decision support, and a structured review response (REVIEW.md). For reviewing YOUR OWN draft against your own questions, use academic_review_draft instead."
+        },
+        {
+         "name": "research-slide",
+         "description": "Turn a research figure or result into a Chinese defense/report slide (答辩/组会/项目汇报) as beamer + LaTeX, compiled to PDF. Triggers: 做成答辩ppt, 把这张图做成幻灯片, 组会/答辩/汇报用的slide, research highlight slide, 把figure X重新组织成一页, 按这个模版做. Optimized for physics/materials/quantum figures. Restrained navy/red style: statement banner, two-column argument, boxed conclusion. For the paper body itself use academic-paper-writing."
+        }
+       ]
+      },
+      "role": "user",
+      "id": "6a632fb5-6fba-4ed2-9aae-15a0b97c640c"
+     },
+     "surfaceOp": "append"
+    }
+   }
+  },
+  {
+   "at": 2629,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "assistant/message",
+     "seq": 17,
+     "time": 1790204957849,
+     "data": {
+      "turn": 1,
+      "step": 1,
+      "message": {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "I'll run the command as requested."
+        },
+        {
+         "type": "tool-call",
+         "id": "call_00_ET_usJ3h4QGkxiE6JFQgw323880",
+         "name": "bash",
+         "arguments": "{\"command\":\"sleep 12\",\"description\":\"Sleep for 12 seconds\",\"timeoutMs\":30000}"
+        }
+       ],
+       "source": {
+        "kind": "model",
+        "provider": "workbuddy",
+        "model": "deepseek-v4.1-flash",
+        "replayState": {
+         "response": {
+          "kind": "pi-ai",
+          "version": 2,
+          "api": "openai-completions",
+          "provider": "workbuddy",
+          "model": "deepseek-v4.1-flash",
+          "responseId": "cmb-cd08bf84b7a311f1bf0356763cecd0e5",
+          "stopReason": "toolUse"
+         },
+         "blocks": [
+          {
+           "type": "text"
+          },
+          {
+           "type": "tool-call"
+          }
+         ]
+        }
+       },
+       "id": "54f77e4e-b0f2-4fc8-81f3-672b4641509b"
+      },
+      "usage": {
+       "inputTokens": 136,
+       "outputTokens": 85,
+       "totalTokens": 12893,
+       "cacheReadTokens": 12672
+      },
+      "stream": [
+       {
+        "type": "chunk",
+        "time": 1790204957439,
+        "chunk": {
+         "type": "block-start",
+         "index": 0,
+         "blockType": "text"
+        }
+       },
+       {
+        "type": "text-chunks",
+        "time0": 1790204957440,
+        "index": 0,
+        "dt": [
+         0,
+         0,
+         0,
+         0,
+         0,
+         19,
+         0
+        ],
+        "texts": [
+         "I",
+         "'ll",
+         " run",
+         " the",
+         " command",
+         " as",
+         " requested",
+         "."
+        ]
+       },
+       {
+        "type": "chunk",
+        "time": 1790204957472,
+        "chunk": {
+         "type": "block-start",
+         "index": 1,
+         "blockType": "tool-call"
+        }
+       },
+       {
+        "type": "tool-call-chunks",
+        "time0": 1790204957472,
+        "index": 1,
+        "dt": [
+         0,
+         0,
+         18,
+         0,
+         0,
+         0,
+         9,
+         0,
+         0,
+         0,
+         12,
+         0,
+         16,
+         0,
+         0,
+         0,
+         18,
+         0,
+         7,
+         0,
+         0,
+         0,
+         32,
+         0,
+         0,
+         0,
+         0,
+         0,
+         6,
+         0,
+         12,
+         15
+        ],
+        "id": "call_00_ET_usJ3h4QGkxiE6JFQgw323880",
+        "name": "bash",
+        "args": [
+         "",
+         "{",
+         "\"",
+         "command",
+         "\"",
+         ": ",
+         "\"",
+         "sleep",
+         " ",
+         "12",
+         "\"",
+         ", ",
+         "\"",
+         "description",
+         "\"",
+         ": ",
+         "\"",
+         "Sleep",
+         " for",
+         " ",
+         "12",
+         " seconds",
+         "\"",
+         ", ",
+         "\"",
+         "time",
+         "out",
+         "Ms",
+         "\"",
+         ": ",
+         "300",
+         "00",
+         "}"
+        ]
+       },
+       {
+        "type": "chunk",
+        "time": 1790204957848,
+        "chunk": {
+         "type": "block-end",
+         "index": 0,
+         "block": {
+          "type": "text",
+          "text": "I'll run the command as requested."
+         }
+        }
+       },
+       {
+        "type": "chunk",
+        "time": 1790204957848,
+        "chunk": {
+         "type": "block-end",
+         "index": 1,
+         "block": {
+          "type": "tool-call",
+          "id": "call_00_ET_usJ3h4QGkxiE6JFQgw323880",
+          "name": "bash",
+          "arguments": "{\"command\":\"sleep 12\",\"description\":\"Sleep for 12 seconds\",\"timeoutMs\":30000}"
+         }
+        }
+       },
+       {
+        "type": "chunk",
+        "time": 1790204957848,
+        "chunk": {
+         "type": "usage",
+         "usage": {
+          "inputTokens": 136,
+          "outputTokens": 85,
+          "totalTokens": 12893,
+          "cacheReadTokens": 12672
+         }
+        }
+       },
+       {
+        "type": "chunk",
+        "time": 1790204957848,
+        "chunk": {
+         "type": "finish",
+         "reason": {
+          "kind": "tool-calls"
+         },
+         "replayState": {
+          "response": {
+           "kind": "pi-ai",
+           "version": 2,
+           "api": "openai-completions",
+           "provider": "workbuddy",
+           "model": "deepseek-v4.1-flash",
+           "responseId": "cmb-cd08bf84b7a311f1bf0356763cecd0e5",
+           "stopReason": "toolUse"
+          },
+          "blocks": [
+           {
+            "type": "text"
+           },
+           {
+            "type": "tool-call"
+           }
+          ]
+         }
+        }
+       }
+      ]
+     },
+     "surfaceOp": "append"
+    }
+   }
+  },
+  {
+   "at": 15784,
+   "stream": "events",
+   "kind": "emit",
+   "event": "api-session/status",
+   "args": [
+    "session-4f0fee6f-6fc3-4990-8577-1d185e2204e1",
+    false
+   ]
+  },
+  {
+   "at": 15784,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "assistant/message",
+     "seq": 22,
+     "time": 1790204971002,
+     "data": {
+      "turn": 1,
+      "step": 2,
+      "message": {
+       "role": "assistant",
+       "content": [
+        {
+         "type": "text",
+         "text": "PINEAPPLE"
+        }
+       ],
+       "source": {
+        "kind": "model",
+        "provider": "workbuddy",
+        "model": "deepseek-v4.1-flash",
+        "replayState": {
+         "response": {
+          "kind": "pi-ai",
+          "version": 2,
+          "api": "openai-completions",
+          "provider": "workbuddy",
+          "model": "deepseek-v4.1-flash",
+          "responseId": "cmb-d56e58cbb7a311f19a5606998f09b18f",
+          "stopReason": "stop"
+         },
+         "blocks": [
+          {
+           "type": "text"
+          }
+         ]
+        }
+       },
+       "id": "78adef03-6564-414c-ac18-c47c57f2be7c"
+      },
+      "usage": {
+       "inputTokens": 236,
+       "outputTokens": 5,
+       "totalTokens": 12913,
+       "cacheReadTokens": 12672
+      },
+      "stream": [
+       {
+        "type": "chunk",
+        "time": 1790204970833,
+        "chunk": {
+         "type": "block-start",
+         "index": 0,
+         "blockType": "text"
+        }
+       },
+       {
+        "type": "text-chunks",
+        "time0": 1790204970833,
+        "index": 0,
+        "dt": [
+         0,
+         0,
+         1
+        ],
+        "texts": [
+         "P",
+         "INE",
+         "APP",
+         "LE"
+        ]
+       },
+       {
+        "type": "chunk",
+        "time": 1790204971002,
+        "chunk": {
+         "type": "block-end",
+         "index": 0,
+         "block": {
+          "type": "text",
+          "text": "PINEAPPLE"
+         }
+        }
+       },
+       {
+        "type": "chunk",
+        "time": 1790204971002,
+        "chunk": {
+         "type": "usage",
+         "usage": {
+          "inputTokens": 236,
+          "outputTokens": 5,
+          "totalTokens": 12913,
+          "cacheReadTokens": 12672
+         }
+        }
+       },
+       {
+        "type": "chunk",
+        "time": 1790204971002,
+        "chunk": {
+         "type": "finish",
+         "reason": {
+          "kind": "stop"
+         },
+         "replayState": {
+          "response": {
+           "kind": "pi-ai",
+           "version": 2,
+           "api": "openai-completions",
+           "provider": "workbuddy",
+           "model": "deepseek-v4.1-flash",
+           "responseId": "cmb-d56e58cbb7a311f19a5606998f09b18f",
+           "stopReason": "stop"
+          },
+          "blocks": [
+           {
+            "type": "text"
+           }
+          ]
+         }
+        }
+       }
+      ]
+     },
+     "surfaceOp": "append"
+    }
+   }
+  },
+  {
+   "at": 15784,
+   "stream": "follow",
+   "kind": "frame",
+   "value": {
+    "type": "event",
+    "event": {
+     "type": "turn/end",
+     "seq": 24,
+     "time": 1790204971003,
+     "data": {
+      "turn": 1,
+      "reason": {
+       "kind": "completed"
+      }
+     }
+    }
+   }
+  }
+ ]
+}

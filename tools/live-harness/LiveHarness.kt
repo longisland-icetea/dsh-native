@@ -300,6 +300,64 @@ fun main(args: Array<String>): Unit = runBlocking {
         holder.cancel()
         delay(1_500)
 
+        // ── a turn that ends while this client is not listening ───────────────
+        //
+        // The composer's Stop/Send button is drawn from the open conversation's
+        // `running` flag, and the only thing that ever pushes that flag down is
+        // `api-session/status` -- an emit the Host sends once and never replays.
+        // A turn that finishes while the socket is down therefore leaves the
+        // button on Stop with the agent idle, which is what a phone in a pocket
+        // produces for real. The session list is the repair: `session/list`
+        // carries `running`, it is read rather than streamed, and `resync`
+        // re-reads it on every new socket generation.
+        //
+        // The turn is started here, the link is cut for real, and the Host is
+        // left to finish it alone. What this asserts is the flag the *composer*
+        // reads, not the drawer's: the two are separate copies of one fact, and
+        // the drawer's was already right while the composer's was stuck.
+        val switchForRunning = linkSwitch()
+        if (switchForRunning == null) {
+            report.check("a link that can be cut is available to test with", false, "DSH_LINK_SWITCH unset")
+        } else {
+            holder.send("HARNESS-STUCK run bash: sleep 15 — then reply STUCK-DONE")
+            until("the turn to be running before the link goes", timeoutMs = 60_000) {
+                holder.state.value.conversation?.takeIf { it.running }
+            }
+            java.io.File(switchForRunning).delete()
+            until("the app's link to be cut", timeoutMs = 15_000) {
+                holder.state.value.connected.not().takeIf { it }
+            }
+            // The Host's own view, read on a client that is not behind the cut: the
+            // app's copy cannot move while the link is down, so waiting on it
+            // would wait forever.
+            var hostSaysRunning = true
+            val hostSettledAt = System.currentTimeMillis() + 120_000
+            while (System.currentTimeMillis() < hostSettledAt) {
+                hostSaysRunning = runCatching {
+                    direct.listSessions().firstOrNull { it.sessionId == session }?.running ?: false
+                }.getOrDefault(true)
+                if (!hostSaysRunning) break
+                delay(1_000)
+            }
+            report.check("the turn finished while the app could not hear about it",
+                !hostSaysRunning && holder.state.value.conversation?.running == true,
+                "host=$hostSaysRunning app=${holder.state.value.conversation?.running}")
+            // The flag the composer would draw from, before the link is back: this
+            // is the bug, stated as state rather than as a screenshot.
+            report.check("and the composer was left offering Stop",
+                composerAction(holder.state.value.conversation?.running == true, "") == ComposerAction.Stop)
+
+            java.io.File(switchForRunning).createNewFile()
+            until("the link to come back", timeoutMs = 30_000) { holder.state.value.connected.takeIf { it } }
+            // The re-read is asynchronous; wait for the flag itself, which is what
+            // the button is drawn from.
+            val repaired = until("the composer's flag to come back down", timeoutMs = 60_000) {
+                holder.state.value.conversation?.takeIf { !it.running }
+            }
+            report.check("a turn that ended off-screen gives the Send button back", !repaired.running)
+            report.check("and the composer agrees", composerAction(repaired.running, "") != ComposerAction.Stop)
+        }
+
         // ── a message sent on a dead link goes out by itself ──────────────────
         //
         // Through the cuttable proxy the harness controls, so this is a real
@@ -358,13 +416,33 @@ fun main(args: Array<String>): Unit = runBlocking {
         // A line the Host does not know is a *message*, not a command: the web
         // client settles that the same way, and it is what keeps a stale command
         // list from swallowing prose.
+        //
+        // Watched through its whole life, for the reason spelled out at the steer
+        // above: the echo is retired by the durable message the instant the Host
+        // logs it, and on a Host that answers in milliseconds that can happen
+        // inside a single poll -- so a check that waits only for the pending row
+        // times out on a run where nothing is wrong. It did, once the reconnect
+        // earlier in this run made the message arrive in a snapshot rather than as
+        // the live event the old version of this check was written against.
+        var sawProseEcho = false
         holder.runCommand("/definitely-not-a-command HARNESS-PROSE")
         val prose = until("an unrecognised line to be sent as a message", timeoutMs = 60_000) {
-            holder.state.value.conversation?.items
-                ?.filterIsInstance<TranscriptItem.Pending>()
-                ?.firstOrNull { it.text.startsWith("/definitely-not-a-command") }
+            val rows = holder.state.value.conversation?.items ?: return@until null
+            rows.filterIsInstance<TranscriptItem.Pending>()
+                .firstOrNull { it.text.contains("HARNESS-PROSE") }
+                ?.let { sawProseEcho = true }
+            rows.filterIsInstance<TranscriptItem.User>().firstOrNull { it.text.contains("HARNESS-PROSE") }
         }
-        report.check("a line that is not a command is sent as a message", prose.text.contains("HARNESS-PROSE"))
+        // The row it became is the reader's own message, which is what "sent as a
+        // message" means -- and it is **not** a command outcome: a line the Host
+        // ran would have produced the note row `/goal` produced above, and a line
+        // it refused would have produced "command not sent".
+        report.check("a line that is not a command is sent as a message", prose.text.contains("HARNESS-PROSE"),
+            if (sawProseEcho) "seen pending first" else "arrived already durable")
+        report.check("and it is not reported as a command that ran",
+            holder.state.value.conversation?.items
+                ?.filterIsInstance<TranscriptItem.Note>()
+                ?.none { it.text.contains("definitely-not-a-command") } == true)
 
         // ── a slow link is survivable, and says so ────────────────────────────
         //

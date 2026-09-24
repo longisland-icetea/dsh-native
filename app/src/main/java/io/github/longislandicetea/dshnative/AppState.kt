@@ -204,6 +204,47 @@ internal fun <T> Flow<T>.resubscribe(
 internal class UpstreamEnded : RuntimeException("stream closed")
 
 /**
+ * The running flag for the open conversation, taken from a list just read.
+ *
+ * `api-session/status` is the live source and normally the only one needed, but
+ * it is an *emit*: the Host pushes it once, on a change, and never replays it. A
+ * turn that ends while this client is not listening -- screen off, a lift, a
+ * router that blipped, a doze the socket did not survive -- therefore leaves the
+ * open conversation claiming a turn that is over, and the composer offering Stop
+ * for nothing. `session/list` carries `running` per row, it is read rather than
+ * streamed, and `resync` already re-reads it on every new socket generation, so
+ * the repair is that read -- adopted here instead of being applied to the drawer
+ * alone.
+ *
+ * A read is a *baseline*, though, and it is older than the moment it lands: a
+ * turn that ends while the response is in flight is not in it. [since] is that
+ * guard -- the statuses seen while this read was outstanding, which outrank it.
+ * The reference client keeps the same list (`recordMutation`/`listMutations` in
+ * `dsh-api-session-controller`'s client, replayed over the baseline) because
+ * without it the repair itself re-creates the bug it exists to fix, in a narrower
+ * window.
+ *
+ * `fallback` is the conversation's own flag, and it stands whenever the list says
+ * nothing about this session: there is no row to contradict it, and absence is
+ * not evidence of "not running". A session this client just created is the case
+ * that matters -- it runs while its first turn does, and the list read that
+ * follows may not have reached it yet.
+ *
+ * Pure, so the rules it encodes are pinned by a test rather than by remembering
+ * them: a read repairs what a missed emit left behind, a delta that arrived while
+ * the read was out is not undone by it, and a silent list never invents a `false`.
+ */
+internal fun runningFromList(
+    sessionId: String,
+    sessions: List<SessionSummary>,
+    fallback: Boolean,
+    /** Statuses seen while this read was in flight, newest last; these win. */
+    since: List<Boolean> = emptyList(),
+): Boolean = since.lastOrNull()
+    ?: sessions.firstOrNull { it.sessionId == sessionId }?.running
+    ?: fallback
+
+/**
  * The unread set after one running-state change.
  *
  * A turn that stops in a session the reader is not looking at finished something
@@ -793,6 +834,11 @@ internal fun AppState.withControlBaseline(snapshot: JsonObject): AppState {
  * person, and a turn starting. Treating them as proof is what makes a session
  * created and used on another client visible here; without it the row sat in the
  * list, blank, hidden by the drawer's own rule, for good.
+ *
+ * A delta outranks the list here: it is pushed on the change itself, and a row
+ * read moments earlier may predate the turn it describes. The list's own value is
+ * adopted where it is *read*, in `refreshSessions`, which is what repairs a delta
+ * that was missed altogether -- see [runningFromList].
  */
 internal fun AppState.withSessionDelta(delta: SessionDelta): AppState = when (delta) {
     is SessionDelta.Running -> copy(
@@ -932,6 +978,25 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var lastListRereadAt = 0L
     /** Waterfall ids the Host handed back since the last `ready`. */
     private val replayedWaterfalls = mutableSetOf<String>()
+    /**
+     * Statuses that arrived while a `session/list` read was in flight.
+     *
+     * A read answers with the Host's state as of the moment it was served, and it
+     * lands later than that -- so a turn that ended in between is simply absent
+     * from it, and adopting the read wholesale would put the composer back on
+     * Stop. These are replayed over the response instead. Session id, newest
+     * last; cleared when the read lands. The reference client keeps the same
+     * record (`listMutations`) for the same reason.
+     */
+    private val statusesDuringRead = mutableMapOf<String, MutableList<Boolean>>()
+    /**
+     * How many `session/list` reads are outstanding.
+     *
+     * Read and written only under [statusesDuringRead]'s monitor, which is what
+     * makes "is a read out?" and "record this against it" one decision rather than
+     * two that can interleave.
+     */
+    private var listReadsInFlight = 0
 
     fun connect(endpoint: DshEndpoint) {
         // A client from here on, so a socket that is not up yet reads as "being
@@ -1099,6 +1164,13 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             val current = _state.value
             val unread = unreadAfter(current.unread, delta.sessionId, delta.running, current.conversation?.sessionId)
             if (unread != current.unread) viewStore?.saveUnread(unread)
+            // Recorded against any read still outstanding, so a response served
+            // before this frame cannot undo it. See `statusesDuringRead`.
+            synchronized(statusesDuringRead) {
+                if (listReadsInFlight > 0) {
+                    statusesDuringRead.getOrPut(delta.sessionId) { mutableListOf() } += delta.running
+                }
+            }
             _state.update { state -> state.withSessionDelta(delta).copy(unread = unread) }
         } else {
             _state.update { state -> state.withSessionDelta(delta) }
@@ -1678,7 +1750,20 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             // empty list that looks like "no sessions".
             var attempt = 0
             while (true) {
+                // Counted around the request, not around the whole retry loop:
+                // what has to be explained is a status that arrives while *this*
+                // request is out, because that is the window in which the response
+                // can be older than the flag it would overwrite.
+                synchronized(statusesDuringRead) { listReadsInFlight++ }
                 val result = runCatching { active.listSessionsDetailed() }
+                val since = synchronized(statusesDuringRead) {
+                    listReadsInFlight--
+                    val held = statusesDuringRead.toMap()
+                    // Only a landing read clears them, so a slow one cannot be
+                    // starved by the next attempt's bookkeeping.
+                    if (listReadsInFlight == 0) statusesDuringRead.clear()
+                    held
+                }
                 result.onSuccess { (sessions, bytes) ->
                     record("session/list ok: ${sessions.size} sessions, ${bytes}B")
                     // Seed usage from the summaries: the control stream is the
@@ -1695,6 +1780,22 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                             sessionsBytes = bytes,
                             sessionsError = null,
                             metrics = seeded + it.metrics,
+                            // The one read that repairs a `running` flag this
+                            // client missed: the Host does not replay a status
+                            // emit, so a turn that ended while the socket was down
+                            // is only ever visible here. Without this the drawer's
+                            // dot went out and the composer's Stop button did not
+                            // -- the same flag, read from two places.
+                            conversation = it.conversation?.let { open ->
+                                open.copy(
+                                    running = runningFromList(
+                                        sessionId = open.sessionId,
+                                        sessions = sessions,
+                                        fallback = open.running,
+                                        since = since[open.sessionId].orEmpty(),
+                                    ),
+                                )
+                            },
                         )
                     }
                     return@launch

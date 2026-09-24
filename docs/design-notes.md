@@ -942,3 +942,53 @@ reads whole, lays out as a heading plus a table, a source deliverable stays
 source, and a 6000-line file comes back marked truncated. All four pass against
 the live Host. They run before the harness's turn, so a failure there does not
 spend model quota.
+
+## Give the Send button back when a turn ends off-screen
+
+The composer's single button is Stop while a turn runs with an empty box and
+Send otherwise, and "a turn is running" is one boolean on the open conversation.
+The Host pushes that boolean on `api-session/status`, which is an **emit**: sent
+once, on a change, and never replayed. Everything therefore depended on being
+connected at the instant the turn ended — and a phone in a pocket, in a lift, or
+on a router that blipped is not. The turn finishes, the emit goes nowhere, and
+the button stays on Stop over an agent that is idle. Tapping it then calls
+`session/cancel` on nothing, which looks like the app ignoring the tap.
+
+The flag was being mirrored twice — onto the session row and onto the open
+conversation — and only the row was ever repaired. `resync` re-reads
+`session/list` on every new socket generation, so the drawer's running dot went
+out correctly while the composer kept offering Stop: the same fact, read from two
+places, one of them fixed. The repair is to adopt the list into the conversation
+as well (`runningFromList`), because the list is the one source of this fact that
+is *read* rather than pushed.
+
+`runningFromList` deliberately does not answer `false` for a session the list
+does not mention. Absence is not evidence: a session created a moment ago has a
+row the last read may not include yet, and reading that silence as "not running"
+would take Stop away mid-turn — replacing a button that sticks with one that
+lies. The conversation's own value stands in that case.
+
+Adopting a read introduces its own ordering hazard, and it is the same bug in a
+narrower window: a `session/list` response describes the Host as of the moment it
+was *served* and lands later than that, so a turn that ends during the round trip
+is simply absent from it. Taking that response at face value would put the button
+back on Stop. The statuses seen while the read is outstanding are therefore
+replayed over the response (`statusesDuringRead`), newest last, so a turn that
+starts and ends inside one slow read still ends up correct. The reference client
+keeps the same record — `listMutations` in `dsh-api-session-controller`'s client,
+replayed over its baseline — which is where the shape came from.
+
+Reproduced and verified against a live Host before the fix was written. The
+harness starts a turn, cuts the link for real through its proxy, waits for the
+Host to finish the turn alone, and asserts *both* halves: the app was left
+offering Stop, and after the reconnect the same flag comes back down. The second
+assertion is the fix; the first is what makes it a regression test rather than a
+restatement. A live capture of one whole turn backs the unit test — both streams
+the app opens, in arrival order, so the offline replay drops the closing emit
+exactly as the asleep phone did.
+
+One unrelated check was fixed on the way. The harness waited for the transient
+`Pending` echo of an unrecognised slash line, and once the reconnect changed when
+that message arrived (in a snapshot rather than as a live event) the echo was
+retired inside a single 200 ms poll. It now watches the row's whole life, as the
+steer check above it already had to — the same lesson, applied the second time.

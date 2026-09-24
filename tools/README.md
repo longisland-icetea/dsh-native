@@ -96,6 +96,23 @@ The emulator is not an option here: WSL2 exposes no `/dev/kvm` unless the
 Windows host provides nested virtualization, which needs Windows 11 (this host
 is Windows 10 19044), and the x86_64 Android images refuse to boot without it.
 
+## Turning a live turn into an offline fixture
+
+```
+node tools/capture-turn.mjs http://127.0.0.1:3080 > app/src/test/resources/turn-running.json
+```
+
+drives one real turn and records **both** streams the app opens -- the
+`session/follow` frames and the forwarded `$events` emits -- in arrival order,
+with the timing of each. That pairing is the point: the composer's Stop/Send
+button is driven by `api-session/status`, an emit the Host never replays, so a
+fixture holding only the conversation cannot express "the light went out before
+the Host said the turn was over" at all. The tool uses Node's own `fetch` and
+`WebSocket` (nothing to install) and archives the session it created.
+
+`ComposerRunningTest` replays the capture and drops the closing status emit,
+which is what a sleeping phone misses.
+
 ## Where the client's state rules live
 
 `docs/reconnect.md` is the rulebook for anything that arrives over a stream: what
