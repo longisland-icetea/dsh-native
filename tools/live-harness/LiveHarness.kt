@@ -207,11 +207,13 @@ fun main(args: Array<String>): Unit = runBlocking {
     ).any { group -> group.sessions.any { it.sessionId == id } }
 
     /**
-     * The Host's own queue for one session, read on a fresh subscriber.
+     * The Host's own pending input for one session, read on a fresh subscriber.
      *
      * A fresh `session/control` connection starts with a baseline, which is the
      * authoritative answer -- "the app's dock is empty" is the wrong question,
-     * because a message can legitimately still be pending.
+     * because a message can legitimately still be pending. Since 0.1.7 the pending
+     * input is the session's `inbox` projection rather than a `queues` map beside
+     * it, so the same decode the app uses is what this reads.
      */
     suspend fun hostQueueNow(id: String): List<QueuedItem> =
         withTimeoutOrNull(10_000) {
@@ -220,8 +222,9 @@ fun main(args: Array<String>): Unit = runBlocking {
                 outsider.control().collect { frame ->
                     val value = (frame as? MuxFrame.Item)?.value as? JsonObject ?: return@collect
                     if (value["type"]?.jsonPrimitive?.contentOrNull != "baseline") return@collect
-                    val table = (value["value"] as? JsonObject)?.get("queues") as? JsonObject
-                    answer.complete(QueueCodec.parse(table?.get(id) as? JsonArray))
+                    val sessions = (value["value"] as? JsonObject)?.get("projections") as? JsonObject
+                    val bag = (sessions?.get(id) as? JsonObject)?.get("values") as? JsonObject
+                    answer.complete(inboxProjection(bag?.get("inbox")).queueRows())
                 }
             }
             val queues = answer.await()
@@ -460,21 +463,36 @@ fun main(args: Array<String>): Unit = runBlocking {
         // times out on a run where nothing is wrong. It did, once the reconnect
         // earlier in this run made the message arrive in a snapshot rather than as
         // the live event the old version of this check was written against.
+        //
+        // The Host's inbox is evidence too, and it is the evidence that does not
+        // depend on the model: this line is sent while the turn the check above
+        // started is still running, so the message waits in the queue until that
+        // turn reaches a step boundary. A prompt in the inbox is a message this
+        // client sent -- a command would never be there -- and waiting for the
+        // durable row instead made the check a measurement of the model's latency.
         var sawProseEcho = false
+        var sawProseInbox = false
         holder.runCommand("/definitely-not-a-command HARNESS-PROSE")
         val prose = until("an unrecognised line to be sent as a message", timeoutMs = 60_000) {
             val rows = holder.state.value.conversation?.items ?: return@until null
             rows.filterIsInstance<TranscriptItem.Pending>()
                 .firstOrNull { it.text.contains("HARNESS-PROSE") }
                 ?.let { sawProseEcho = true }
-            rows.filterIsInstance<TranscriptItem.User>().firstOrNull { it.text.contains("HARNESS-PROSE") }
+            holder.state.value.queues[session]
+                ?.firstOrNull { it.label.contains("HARNESS-PROSE") }
+                ?.let { sawProseInbox = true; return@until it.label }
+            rows.filterIsInstance<TranscriptItem.User>().firstOrNull { it.text.contains("HARNESS-PROSE") }?.text
         }
         // The row it became is the reader's own message, which is what "sent as a
         // message" means -- and it is **not** a command outcome: a line the Host
         // ran would have produced the note row `/goal` produced above, and a line
         // it refused would have produced "command not sent".
-        report.check("a line that is not a command is sent as a message", prose.text.contains("HARNESS-PROSE"),
-            if (sawProseEcho) "seen pending first" else "arrived already durable")
+        report.check("a line that is not a command is sent as a message", prose.contains("HARNESS-PROSE"),
+            when {
+                sawProseEcho -> "seen pending first"
+                sawProseInbox -> "waiting in the Host's inbox"
+                else -> "arrived already durable"
+            })
         report.check("and it is not reported as a command that ran",
             holder.state.value.conversation?.items
                 ?.filterIsInstance<TranscriptItem.Note>()
@@ -538,14 +556,34 @@ fun main(args: Array<String>): Unit = runBlocking {
                 listed(other).takeIf { it }
             }
             report.check("a session used on another client shows up in the drawer", listed(other))
-            // The Host's workspace API is archive-only -- there is no unarchive
-            // to call -- so this checks the one direction that exists. A session
-            // archived on another client must leave this client's list.
+            // The archive set is what this client draws, so archiving elsewhere is
+            // the direction that can be checked end to end. An archived session
+            // also may not run a turn on 0.1.7 -- the controller's archived-session
+            // gate ends a proposed step as `blocked` -- so it is restored before the
+            // checks below prompt it, and restoring it is a check of its own: the
+            // app adopts the Host's set wholesale, so an unarchive has to reach it
+            // the same way an archive does.
+            //
+            // The Host refuses to archive a session that still has a turn running
+            // (`workspace/session-active`), and the reply above *is* a turn: wait
+            // for it to settle rather than racing it.
+            withTimeoutOrNull(60_000) {
+                while (true) {
+                    val row = direct.listSessions().firstOrNull { it.sessionId == other }
+                    if (row != null && !row.running) break
+                    delay(500)
+                }
+            }
             outsider.archiveSession(other)
             until("the archive set to reach this client") {
                 holder.state.value.archived.contains(other).takeIf { it }
             }
-            report.check("a session archived elsewhere leaves the list", true)
+            report.check("a session archived elsewhere leaves the list", !listed(other))
+            outsider.unarchiveSession(other)
+            until("the unarchive to reach this client") {
+                holder.state.value.archived.contains(other).not().takeIf { it }
+            }
+            report.check("and one unarchived elsewhere comes back", listed(other))
 
             // A lost socket, and a turn the Host starts while this client is not
             // listening: `api-session/status` is an emit, not a durable event, so
@@ -594,6 +632,20 @@ fun main(args: Array<String>): Unit = runBlocking {
                 // a one-word reply can finish inside the reconnect, which would
                 // make the check depend on the race rather than on the re-read.
                 direct.prompt(other, "HARNESS-OFFLINE run bash: sleep 20 — then reply FOUND")
+                // And it has to have *started* before the link comes back. The app
+                // re-reads the list once, on the reconnect, so a prompt the Host had
+                // not picked up yet would leave the app's list saying "not running"
+                // and this check waiting for a second re-read that never comes --
+                // which measures the Host's latency rather than the re-read. What
+                // the check needs is a turn that was running while this client could
+                // not hear about it.
+                withTimeoutOrNull(60_000) {
+                    while (true) {
+                        val row = direct.listSessions().firstOrNull { it.sessionId == other }
+                        if (row?.running == true) break
+                        delay(250)
+                    }
+                }
                 java.io.File(switch).createNewFile()
                 until("the link to come back", timeoutMs = 30_000) { holder.state.value.connected.takeIf { it } }
                 // `api-session/status` is an emit the app was not there to receive,
@@ -605,10 +657,11 @@ fun main(args: Array<String>): Unit = runBlocking {
             }
             report.check("and the transcript was re-established too",
                 holder.state.value.conversation?.items?.isNotEmpty() == true)
-            // Archived earlier in this run and never unarchived (the Host has no
-            // unarchive), so being in step now means the re-read kept it.
+            // Unarchived earlier in this run, so being in step now means the
+            // re-read kept the *removal* -- an archive set adopted wholesale has to
+            // follow the Host in both directions.
             report.check("with the archive set still in step",
-                holder.state.value.archived.contains(other))
+                !holder.state.value.archived.contains(other))
         } finally {
             runCatching { direct.cancel(other) }
             runCatching { outsider.cancel(other) }
@@ -619,9 +672,15 @@ fun main(args: Array<String>): Unit = runBlocking {
         failure = error
     } finally {
         // Leave the Host as it was found: nothing running, nothing listed.
+        // Cancelling is not instant and an active session cannot be archived, so
+        // the archive is retried until it takes -- a session left behind is litter
+        // on someone's Host, and a teardown that gives up quietly leaves it there.
         runCatching { sessionId?.let { outsider.cancel(it) } }
-        delay(1_000)
-        runCatching { sessionId?.let { outsider.archiveSession(it) } }
+        sessionId?.let { id ->
+            withTimeoutOrNull(30_000) {
+                while (!runCatching { outsider.archiveSession(id) }.isSuccess) delay(500)
+            }
+        }
         holder.disconnect(quiet = true)
         outsider.stop()
         direct.stop()

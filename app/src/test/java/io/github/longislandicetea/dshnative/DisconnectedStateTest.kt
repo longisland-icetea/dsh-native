@@ -22,24 +22,42 @@ import org.junit.Test
  * reported as undelivered because the reconnect could not see far enough back.
  */
 class DisconnectedStateTest {
+    /** One pending message, in the shape the `inbox` projection spells. */
     private fun queued(id: String, text: String) = buildJsonObject {
         put("id", JsonPrimitive(id))
-        put("placement", JsonPrimitive("steering"))
-        put("message", buildJsonObject {
-            put("id", JsonPrimitive(id))
-            put("content", buildJsonArray {
-                add(buildJsonObject { put("type", JsonPrimitive("text")); put("text", JsonPrimitive(text)) })
-            })
+        put("role", JsonPrimitive("user"))
+        put("content", buildJsonArray {
+            add(buildJsonObject { put("type", JsonPrimitive("text")); put("text", JsonPrimitive(text)) })
         })
     }
 
+    /**
+     * A `session/control` baseline: every session's projection bag, with the
+     * `inbox` projection holding whatever is pending.
+     */
     private fun baseline(queues: Map<String, List<String>>) = buildJsonObject {
-        put("queues", buildJsonObject {
+        put("projections", buildJsonObject {
             queues.forEach { (sessionId, texts) ->
-                put(sessionId, buildJsonArray { texts.forEach { add(queued("id-$it", it)) } })
+                put(sessionId, buildJsonObject {
+                    put("asOfSeq", JsonPrimitive(1))
+                    put("values", buildJsonObject {
+                        put("inbox", buildJsonObject {
+                            put("next-turn", buildJsonArray { texts.forEach { add(queued("id-$it", it)) } })
+                            put("next-step", buildJsonArray { })
+                        })
+                    })
+                })
             }
         })
     }
+
+    private fun rows(vararg texts: String) =
+        inboxProjection(
+            buildJsonObject {
+                put("next-turn", buildJsonArray { texts.forEach { add(queued("id-$it", it)) } })
+                put("next-step", buildJsonArray { })
+            },
+        ).queueRows()
 
     /**
      * The bug the phone showed: a steer claimed while the client's socket was
@@ -48,7 +66,7 @@ class DisconnectedStateTest {
      */
     @Test
     fun a_baseline_clears_a_queue_row_the_host_no_longer_has() {
-        val stale = AppState(queues = mapOf("s1" to QueueCodec.parse(buildJsonArray { add(queued("id-old", "STEER-OLD")) })))
+        val stale = AppState(queues = mapOf("s1" to rows("STEER-OLD")))
         assertEquals(1, stale.queues.getValue("s1").size)
 
         val afterReconnect = stale.withControlBaseline(baseline(mapOf("s1" to emptyList())))
@@ -83,7 +101,7 @@ class DisconnectedStateTest {
     /** A baseline that does carry a queue is adopted as the whole truth. */
     @Test
     fun a_baseline_replaces_the_queue_it_describes() {
-        val before = AppState(queues = mapOf("s1" to QueueCodec.parse(buildJsonArray { add(queued("id-old", "OLD")) })))
+        val before = AppState(queues = mapOf("s1" to rows("OLD")))
         val after = before.withControlBaseline(baseline(mapOf("s1" to listOf("NEW"))))
         assertEquals(listOf("NEW"), after.queues.getValue("s1").map { it.label })
     }

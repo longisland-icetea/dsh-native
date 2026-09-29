@@ -1067,3 +1067,82 @@ for `"queue"` and `"jobs"` frames. Usage and context pressure survive because th
 already read out of `projections`; the queue dock and the job list do not. That is its
 own change, with its own captures of the `inbox` shape and of a splice, and it is not in
 this one.
+
+## Draw the dock from the inbox, and the job roster from its own stream
+
+The second break the same update caused, and the one the image fix's own harness run
+surfaced. Two mirrors went empty at once: the queue dock never showed a message again,
+and the running-tasks button counted nothing. Both were reading a shape 0.1.7 had
+deleted. `session/control`'s baseline used to be three tables -- `queues`, `jobs`, and
+`projections` -- with `queue` and `jobs` frames patching the first two; it is now the
+projections alone, plus one `projection` frame per changed key. Read from the live Host
+through this app's own client, the baseline is `{projections}`, and the queue lives in
+each session's own `inbox` projection as `{"next-turn": [...], "next-step": [...]}`.
+
+### The list a message is in is its placement
+
+0.1.5 carried a `placement` field on a queue snapshot (`queued`, `steering`,
+`context`). 0.1.7 encodes the same fact structurally: `next-turn` is a message waiting
+for a turn of its own, `next-step` is one being folded into the running turn, and
+`steer` is the action that moves one from the first list to the second. So the dock's
+rows are `next-step` first and `next-turn` after, because that is the order the Host
+claims them in -- the row about to disappear is the one at the top.
+
+The item is now the message itself rather than a wrapper: `id`, `content` blocks, and a
+`source` whose `rpcId` is the prompt identity this client retires its own echo on. Three
+consequences are worth naming. `preview` is gone, so a row's label *is* its text. A
+message with no id is dropped rather than drawn, because every action the row offers
+names that id. And the shape is decoded in one place: the same `inboxProjection` reads
+the follow snapshot's bag, the control baseline's, and a `projection` frame's value, so
+the transcript's inbox mirror and the dock cannot disagree about what is pending.
+
+### The roster is a stream of its own, and "no jobs" is not "not a roster"
+
+Jobs moved to `job/list`, scoped to a session and answering with the whole set that
+session can see -- its own jobs plus every unowned one -- so a frame replaces the list.
+It is opened for the conversation on screen, which is the only roster the UI draws, and
+its first frame after a reconnect is already the truth.
+
+One trap is worth recording because a test caught it: `job/follow`, which streams a
+single job's output, shares the namespace. A frame of *that* stream decoded as "no
+jobs" would empty the button, so a frame that is not a roster returns null and the
+state is left alone; only a `rows` frame with an empty list is the removal.
+
+### What is tested where
+
+`PendingQueueTest` replays the Host's own frames (`steer-inbox.json`: one running turn,
+one steer folded into it, one message queued behind it, captured over `session/control`)
+through the real fold, and covers the shapes the wire did not show: a message with no
+id, a row whose blocks this build cannot read, several text blocks in one message, and
+the frames that must change nothing. `JobsTest`'s wiring half does the same for
+`job-list.json`, including the non-roster frame. `DisconnectedStateTest` already owned
+the "a snapshot replaces, it does not merge" rule; its baseline helper now spells the
+projection shape, so the rule is still pinned against the wire that carries it.
+
+The harness's dock-versus-Host check reads the Host's inbox the way the app does now,
+which is what makes it a check on the mapping rather than on the app agreeing with
+itself. It is the check that was red before this change, and the steer it drives -- a
+message admitted mid-turn, seen as a steering row, then landed in the transcript -- is
+the same journey a reader takes.
+
+### An archived session does not run turns any more
+
+Found while making the harness's last red check pass, and worth writing down
+because it is a behaviour, not a bug in either side. 0.1.7 added an
+archived-session gate to the controller: an archived session -- or a subagent
+descendant of one -- **may not run a model step until it is restored**. A prompt to
+one is admitted and the proposed step then ends as `blocked` without a request, so
+a client that sends to an archived session and waits for a turn waits forever. The
+gate lifts for the whole lineage on `workspace/unarchiveSession`, which the same
+release added.
+
+Two consequences here. The harness had been archiving a session and then prompting
+it -- the offline-turn check, which is why that check began failing the moment the
+run got far enough to reach it -- so it now restores the session before prompting,
+and the unarchive itself became a check: the app adopts the Host's archive set
+wholesale, so a removal has to reach the drawer the same way an addition does.
+`DshClient` gained `unarchiveSession` beside `archiveSession` for it. The app's
+own drawer still has no unarchive button, and a reader who opens an archived
+session and types will see their message admitted and then nothing happen; that is
+a UI guard for another change, recorded here because the Host's rule is what makes
+it necessary rather than a mystery.

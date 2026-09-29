@@ -13,10 +13,11 @@ import kotlinx.serialization.json.put
 /**
  * A message that is waiting rather than running.
  *
- * The queue is the Host's, not this client's: `session/control` streams a complete
- * snapshot per session, so this is a rendering of the Host's state rather than an
- * optimistic list. That matters because the Host claims an item the moment a steer
- * window opens, and a locally-maintained list would keep showing it.
+ * The queue is the Host's, not this client's: the session's `inbox` projection is
+ * streamed whole -- on `session/control`, and in every follow snapshot -- so this
+ * is a rendering of the Host's state rather than an optimistic list. That matters
+ * because the Host claims an item the moment a steer window opens, and a
+ * locally-maintained list would keep showing it.
  */
 @Serializable
 data class QueuedItem(
@@ -31,15 +32,14 @@ data class QueuedItem(
     val rpcId: String? = null,
     /** `queued` waits its turn; `steering` is being folded into the running turn. */
     val placement: String = "queued",
-    val preview: String = "",
     val text: String? = null,
     val content: JsonArray? = null,
 ) {
     /** Whether this row is on its way into the running turn already. */
     val steering: Boolean get() = placement == "steering"
 
-    /** What to put in the row: the Host's preview, falling back to the text. */
-    val label: String get() = preview.ifBlank { text.orEmpty() }
+    /** What to put in the row: the message the Host is holding. */
+    val label: String get() = text.orEmpty()
 
     /** Only text can be edited; the Host rejects anything else. */
     val editable: Boolean
@@ -69,39 +69,36 @@ object QueueAction {
 }
 
 /**
- * Decode one `session/control` queue snapshot.
+ * The dock's rows for one session's pending input.
  *
- * The frame carries `items[]` for a whole session, and each item's shape is the
- * controller's `SessionQueuedItem`: an id, a placement, and a `message` whose own
- * `content[]` holds the blocks. A shape this build does not recognise yields
- * nothing rather than a broken row, because a queue row the reader cannot act on
- * is worse than no row.
+ * Which list a message is in *is* its placement: `next-turn` waits for a turn of
+ * its own, `next-step` is being folded into the running turn, which is where the
+ * Host puts a steer. 0.1.5 said the same thing in a `placement` field on a queue
+ * snapshot; 0.1.7 says it with the list, and the item is now the message itself --
+ * an id, content blocks, and a `source` carrying the prompt identity this client
+ * retires its own echo on.
+ *
+ * The steering rows come first because that is the order the Host consumes them
+ * in -- it claims `next-step` before `next-turn`, so the row that is about to
+ * disappear is the one at the top of the dock.
+ *
+ * A message with no id is dropped rather than shown broken: every action the row
+ * offers names the id, so a row without one would offer buttons that cannot work.
  */
-object QueueCodec {
-    fun parse(items: JsonArray?): List<QueuedItem> {
-        if (items == null) return emptyList()
-        return items.mapNotNull { element ->
-        val obj = element as? JsonObject ?: return@mapNotNull null
-        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-        val message = obj["message"] as? JsonObject
-        val content = message?.get("content") as? JsonArray
-        val text = content?.mapNotNull { part ->
-            (part as? JsonObject)?.takeIf { it["type"]?.jsonPrimitive?.contentOrNull == "text" }
-                ?.get("text")?.jsonPrimitive?.contentOrNull
-        }?.joinToString("\n")?.ifBlank { null }
-        QueuedItem(
-            id = id,
-            rpcId = (obj["rpcId"] as? JsonPrimitive)?.contentOrNull,
-            placement = obj["placement"]?.jsonPrimitive?.contentOrNull ?: "queued",
-            preview = (obj["preview"] as? JsonPrimitive)?.contentOrNull
-                ?: obj["previewText"]?.jsonPrimitive?.contentOrNull
-                ?: message?.get("preview")?.jsonPrimitive?.contentOrNull
-                ?: "",
-            text = text,
-            content = content,
-        )
-        }
-    }
+internal fun InboxProjection?.queueRows(): List<QueuedItem> {
+    val inbox = this ?: return emptyList()
+    return inbox.nextStep.mapNotNull { it.queued("steering") } +
+        inbox.nextTurn.mapNotNull { it.queued("queued") }
+}
+
+/** One pending message as a dock row, or null when it has nothing to act on. */
+private fun InboxMessage.queued(placement: String): QueuedItem? {
+    if (id.isEmpty()) return null
+    val text = content?.mapNotNull { part ->
+        (part as? JsonObject)?.takeIf { it["type"]?.jsonPrimitive?.contentOrNull == "text" }
+            ?.get("text")?.jsonPrimitive?.contentOrNull
+    }?.joinToString("\n")?.ifBlank { null }
+    return QueuedItem(id = id, rpcId = rpcId, placement = placement, text = text, content = content)
 }
 
 /**

@@ -48,7 +48,7 @@ messages and settle notices to the human bubble.
 |---|---|
 | `turn/start`, `step/start`, `step/end` | hundreds per turn against tens of messages; bounds are implied by the rows between them |
 | `request/header`, `request/context` | host bookkeeping; the token counts duplicate what the chip shows |
-| `agent/inbox/spliced` | subagent plumbing |
+| `agent/inbox/spliced` | not a row: it is the durable delta the pending-inbox mirror is folded from, and the dock's rows come from the projection it maintains |
 | `session/end-seed` | an empty marker |
 | `assistant/attempt` | raw stream chunks; the message it becomes is rendered anyway. Its `usage` is worth revisiting as a token meter |
 | `permission/preset`, `sandbox/mode`, `approval/policy` | session configuration, not conversation; belongs in a settings surface |

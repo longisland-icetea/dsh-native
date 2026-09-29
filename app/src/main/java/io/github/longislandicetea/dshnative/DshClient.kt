@@ -871,15 +871,31 @@ class DshClient(
         callOrNull("commands/execute", commandExecuteArgs(sessionId, line)) != null
 
     /**
-     * Live Host-wide control state: pending queues, jobs and projections.
+     * Live Host-wide control state: pending projections and usage.
      *
      * One generation starts with a `baseline` frame carrying a complete snapshot
-     * per session, then frames that replace one part of it. This is where the
-     * queue and the usage numbers come from -- `session/follow` carries the
+     * per session -- the projection bag, including the `inbox` the queue dock is
+     * drawn from -- then frames that replace one projection of it. This is where
+     * the queue and the usage numbers come from: `session/follow` carries the
      * transcript, not the control state, and polling the session list for them
      * would miss every change inside a turn.
      */
     fun control(): Flow<MuxFrame> = openStream("session/control", buildJsonObject { })
+
+    /**
+     * The background-job roster one session can see, as whole-set frames.
+     *
+     * Its own stream since 0.1.7: the control baseline used to carry a `jobs` map
+     * beside the projections, and the roster now arrives over `job/list`, scoped
+     * to a session -- its own jobs plus every unowned one. One frame is the whole
+     * set, so a reconnect's first frame is already the truth.
+     */
+    fun jobs(sessionId: String): Flow<MuxFrame> = openStream(
+        "job/list",
+        buildJsonObject {
+            put("request", buildJsonObject { put("sessionId", JsonPrimitive(sessionId)) })
+        },
+    )
 
     /**
      * Every command the Host offers this session.
@@ -914,14 +930,28 @@ class DshClient(
     }
 
     /** Archive one session; the Host answers with the complete resulting set. */
-    suspend fun archiveSession(sessionId: String): List<String> {
+    suspend fun archiveSession(sessionId: String): List<String> = archive("workspace/archiveSession", sessionId)
+
+    /**
+     * Restore one archived session, which the Host added in 0.1.7.
+     *
+     * Worth knowing what archiving *means* on that Host: an archived session may
+     * not run a model step until it is restored (the controller's archived-session
+     * gate), so a prompt to one is admitted and then ends as `blocked` without a
+     * request. Nothing this app does depends on that -- it has no unarchive of its
+     * own -- but a client that prompts an archived session and waits for a turn
+     * waits forever.
+     */
+    suspend fun unarchiveSession(sessionId: String): List<String> = archive("workspace/unarchiveSession", sessionId)
+
+    private suspend fun archive(method: String, sessionId: String): List<String> {
         val args = buildJsonObject {
             put(
                 "request",
                 json.encodeToJsonElement(ArchiveSessionRequest.serializer(), ArchiveSessionRequest(sessionId)),
             )
         }
-        val value = call("workspace/archiveSession", args)
+        val value = call(method, args)
         return runCatching {
             json.decodeFromJsonElement(ArchiveValue.serializer(), value).archivedSessionIds
         }.getOrDefault(emptyList())

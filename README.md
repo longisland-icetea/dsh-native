@@ -142,7 +142,7 @@ and how the rejected outline was caught.
 
 ## Protocol notes
 
-Six things about this harness are easy to get wrong, and each cost a bug here:
+Seven things about this harness are easy to get wrong, and each cost a bug here:
 
 - **Event shapes come from the wire, never from a guess.** `docs/event-coverage.md`
   records where each one was observed, and the decoder tests pin them with captured
@@ -153,8 +153,10 @@ Six things about this harness are easy to get wrong, and each cost a bug here:
   words in the reader's mouth.
 - **The Host owns workspace grouping and the archive set**; the client renders what
   `workspace/follow` reports. Archiving is reversible as of 0.1.7
-  (`workspace/unarchiveSession`, which this client does not call yet); sessions can
-  also be pinned.
+  (`workspace/unarchiveSession`, which `DshClient` can call but the drawer offers no
+  button for yet); sessions can also be pinned. An archived session also may not run
+  a turn until it is restored — the controller's archived-session gate — so a
+  message sent to one is admitted and never answered.
 - **`session/create` takes `workspaceId` or `cwd`, never both**, and only the
   workspace route makes the new session a member of that group.
 - **An argument's name is part of the contract, and names get renamed.** The
@@ -167,6 +169,12 @@ Six things about this harness are easy to get wrong, and each cost a bug here:
   `null` in it, and an `attachments` entry beside the result says which part fills
   it (`[{path:["data"],codec:"bytes",part:"bytes-0"}]`). Reading only the JSON gets
   a null; reading the body as JSON gets nothing at all.
+- **Live state arrives as projections, not as bespoke tables.** `session/control`
+  answers a baseline of projection bags and then one `projection` frame per changed
+  key; there is no `queues` or `jobs` map, and no `queue` or `jobs` frame, since
+  0.1.7. Pending input is a session's `inbox` projection (`next-turn` waits for a
+  turn, `next-step` is being folded into the running one — the list *is* the
+  placement), and the job roster has its own `job/list` stream.
 
 ## License
 

@@ -1,8 +1,6 @@
 package io.github.longislandicetea.dshnative
 
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -114,75 +112,33 @@ class UsageAndQueueTest {
 
     // ---- queue -------------------------------------------------------------
 
-    /** The frame shape measured from `session/control`. */
-    private fun queueFrame(placement: String = "queued", text: String = "second thoughts") = buildJsonArray {
-        add(buildJsonObject {
-            put("id", "message-1")
-            put("placement", placement)
-            put("message", buildJsonObject {
-                put("id", "message-1")
-                put("content", buildJsonArray {
-                    add(buildJsonObject { put("type", "text"); put("text", text) })
-                })
-            })
-        })
-    }
-
-    @Test
-    fun a_queue_frame_becomes_rows() {
-        val items = QueueCodec.parse(queueFrame())
-        assertEquals(1, items.size)
-        assertEquals("message-1", items[0].id)
-        assertEquals("second thoughts", items[0].text)
-        assertFalse(items[0].steering)
-        assertTrue(items[0].editable)
-    }
+    /**
+     * The queue's own rules, over rows built by hand.
+     *
+     * The *decode* is `PendingQueueTest`'s, against a captured `inbox`; what is
+     * left here are the decisions the dock makes once it has rows, and they do not
+     * depend on where the rows came from.
+     */
+    private fun row(id: String, text: String, placement: String = "queued") =
+        QueuedItem(id = id, placement = placement, text = text)
 
     @Test
     fun a_steering_row_is_marked_and_not_offered_again() {
-        val item = QueueCodec.parse(queueFrame(placement = "steering")).single()
-        assertTrue(item.steering)
-        assertTrue(item.editable)
-        assertFalse("a row already going in cannot be steered again", QueueView.canSteer(running = true, item = item))
-        assertTrue(QueueView.canSteer(running = true, item = QueueCodec.parse(queueFrame()).single()))
-        assertFalse("nothing to steer when no turn is running", QueueView.canSteer(running = false, item = QueueCodec.parse(queueFrame()).single()))
-    }
-
-    /** A row whose blocks this build cannot read is dropped, not shown broken. */
-    @Test
-    fun an_unreadable_row_is_dropped() {
-        val noId = buildJsonArray { add(buildJsonObject { put("placement", "queued") }) }
-        assertTrue(QueueCodec.parse(noId).isEmpty())
-        assertTrue(QueueCodec.parse(null).isEmpty())
-    }
-
-    /** A non-text row can be removed and steered but not edited. */
-    @Test
-    fun a_non_text_row_is_not_editable() {
-        val withImage = buildJsonArray {
-            add(buildJsonObject {
-                put("id", "m2")
-                put("placement", "queued")
-                put("message", buildJsonObject {
-                    put("content", buildJsonArray {
-                        add(buildJsonObject { put("type", "image") })
-                    })
-                })
-            })
-        }
-        val item = QueueCodec.parse(withImage).single()
-        assertFalse(item.editable)
-        // It still needs a label, so the preview or the fallback shows something.
-        assertEquals("", item.label)
+        val steering = row("m1", "second thoughts", placement = "steering")
+        assertTrue(steering.steering)
+        assertTrue(steering.editable)
+        assertFalse("a row already going in cannot be steered again", QueueView.canSteer(running = true, item = steering))
+        assertTrue(QueueView.canSteer(running = true, item = row("m2", "later")))
+        assertFalse("nothing to steer when no turn is running", QueueView.canSteer(running = false, item = row("m2", "later")))
     }
 
     @Test
     fun the_count_label_names_what_is_waiting() {
         assertNull(QueueView.countLabel(emptyList()))
-        assertEquals("1 message waiting", QueueView.countLabel(QueueCodec.parse(queueFrame())))
+        assertEquals("1 message waiting", QueueView.countLabel(listOf(row("m1", "one"))))
         assertEquals(
             "2 messages waiting",
-            QueueView.countLabel(QueueCodec.parse(queueFrame()) + QueueCodec.parse(queueFrame(placement = "steering"))),
+            QueueView.countLabel(listOf(row("m1", "one"), row("m2", "two", placement = "steering"))),
         )
     }
 

@@ -90,8 +90,32 @@ object Jobs {
         sessions.filter { it.parentSessionId == parentSessionId && it.running }
 }
 
-/** Decode the control stream's job lists, which arrive per session. */
+/**
+ * Decode the Host's job roster.
+ *
+ * One `job/list` frame is the whole set a session can see -- its own jobs plus
+ * every unowned one -- so a frame replaces the list rather than adding to it, and
+ * a reconnect's first frame is already the truth. The rows are the controller's
+ * `JobView`: what the card draws, plus output bookkeeping this client does not
+ * read (a job's output has its own stream, `job/follow`).
+ */
 object JobCodec {
+    /**
+     * The roster one `job/list` frame carries, or null when the frame is not a
+     * roster at all.
+     *
+     * The difference is the difference between "no jobs" and "not a roster": an
+     * empty roster is the removal, and a frame from the sibling `job/follow`
+     * stream -- one job's output, same namespace -- read as an empty roster would
+     * take the button's whole list away.
+     */
+    fun parseFrame(frame: JsonElement?): List<HostJob>? {
+        val obj = frame as? JsonObject ?: return null
+        if ((obj["type"] as? JsonPrimitive)?.contentOrNull != "rows") return null
+        return parse(obj["jobs"])
+    }
+
+    /** The rows in one array, as the frame spells them. */
     fun parse(element: JsonElement?): List<HostJob> {
         val array = element as? JsonArray ?: return emptyList()
         return array.mapNotNull { entry ->

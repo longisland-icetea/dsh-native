@@ -77,12 +77,13 @@ write, output, reasoning share, cache-hit percentage). Nothing is polled: the
 ### 3. The message queue
 
 **Done.** A queue dock above the composer lists what is waiting, from the Host's
-own `session/control` snapshots, with per-row **steer**, **edit** and **remove**
-over `session/updateQueue`. Editing reuses the composer rather than growing an
-input inside the row, and a steered message appears as a `STEERING` row until the
-Host retires it into the log — the acknowledgement that it arrived. Sending while
-the agent is busy steers by default; a long press on send offers "queue for next
-turn".
+own `inbox` projection on `session/control` — the list a message is in *is* its
+placement, `next-step` (being folded into the running turn) before `next-turn` —
+with per-row **steer**, **edit** and **remove** over `session/updateQueue`. Editing
+reuses the composer rather than growing an input inside the row, and a steered
+message appears as a `STEERING` row until the Host retires it into the log — the
+acknowledgement that it arrived. Sending while the agent is busy steers by default;
+a long press on send offers "queue for next turn".
 
 ### 4. Slash commands
 
@@ -142,11 +143,13 @@ is a scroll; search is the feature that makes the list usable again.
   configuration, and agent-preset management. The app's Settings is a connection
   dialog only. Two of these are phone-relevant: **language**, because the app's
   UI is English while the harness ships a Chinese locale, and **font size**.
-- **Jobs, schedule, subagents, workflow.** The web has a jobs popover
-  (`job_list`-fed, with live/running counts and elapsed time), a reminder catalog,
-  a subagent tree with per-row tokens and duration that navigates into child
-  sessions, a workflow-run panel, and a goal bar with pause/resume/edit/clear.
-  The app renders a background job as a plain tool card and has none of the rest.
+- **Jobs, schedule, subagents, workflow.** The app has the jobs half: a
+  running-tasks button in the header, fed by the Host's `job/list` roster, opening
+  a list of live jobs with kind, elapsed time and status, plus the running
+  subagents of the open session with a jump into the child session. The web's
+  version also has a reminder catalog, per-row subagent tokens and duration, a
+  workflow-run panel, and a goal bar with pause/resume/edit/clear, none of which
+  the app has.
 - **Access mode.** The web switches the permission preset per session
   (`/permission`, with a risk-confirmation dialog for Full access) and sets the
   default for new sessions. The app shows `permission/preset` as a note but cannot

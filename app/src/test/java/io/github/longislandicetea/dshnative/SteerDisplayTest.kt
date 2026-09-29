@@ -28,6 +28,10 @@ import org.junit.Test
  * carried the steered message correctly every time -- it was in the Host's inbox,
  * and later in its log -- while the app showed nothing at all until a turn read
  * it: minutes, on a long tool call, and never if the Host let the message go.
+ *
+ * The dock's half of the same story is `PendingQueueTest`, replayed from a
+ * capture of the projection the Host sends now: these fixtures also carry the
+ * `queue` frames of 0.1.5, and those are no longer a shape this client reads.
  */
 class SteerDisplayTest {
     private fun fixture(name: String): JsonObject = Json.parseToJsonElement(
@@ -264,18 +268,6 @@ class SteerDisplayTest {
         val inbox = Inbox(nextStep = listOf(InboxMessage("m1", "rpc-1")))
         val past = splice(seq = 3, start = 4, removed = 1, outcome = "canceled")
         assertEquals(inbox, inbox.apply(past).inbox)
-    }
-
-    /** The queue frames a capture carried say the same thing the inbox does. */
-    @Test
-    fun the_queue_frame_marks_the_steer_and_then_retires_it() {
-        for (capture in listOf(delivered, removed)) {
-            val frames = capture["control"]!!.jsonArray.map { QueueCodec.parse(it.jsonObject["items"]!!.jsonArray) }
-            val steering = frames.flatten().singleOrNull { it.steering }
-            assertEquals(rpcId(capture), steering?.rpcId)
-            assertEquals(text(capture), steering?.label)
-            assertEquals("the steering row is retired", 0, frames.last().size)
-        }
     }
 
     /** The row is retired by identity, not by a timer. */

@@ -1,6 +1,8 @@
 package io.github.longislandicetea.dshnative
 
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -142,62 +144,63 @@ class LinkLightTest {
 }
 
 /**
- * The wiring from the control stream to the state the button reads.
+ * The wiring from the roster stream to the state the button reads.
  *
- * A baseline is a snapshot, so it replaces: a session whose job list arrives
- * empty has no jobs, and one that was holding jobs must not keep them -- the same
- * rule that keeps a claimed steer from sitting in the dock forever.
+ * The roster has its own stream since 0.1.7: `job/list`, scoped to a session, and
+ * one frame is the whole set that session can see -- its own jobs plus every
+ * unowned one. So a frame replaces what the state holds rather than adding to it:
+ * a session whose roster arrives empty has no jobs, and one that was holding jobs
+ * must not keep them, which is the same rule that keeps a claimed steer from
+ * sitting in the dock forever.
+ *
+ * The frame is the Host's own (`job-list.json`, read from a live 0.1.7 Host).
  */
 class JobsWiringTest {
-    private fun baseline(jobs: List<Pair<String, List<HostJob>>>) = kotlinx.serialization.json.buildJsonObject {
-        put(
-            "jobs",
-            kotlinx.serialization.json.buildJsonObject {
-                jobs.forEach { (sessionId, list) ->
-                    put(
-                        sessionId,
-                        kotlinx.serialization.json.buildJsonArray {
-                            list.forEach { job ->
-                                add(
-                                    kotlinx.serialization.json.buildJsonObject {
-                                        put("id", kotlinx.serialization.json.JsonPrimitive(job.id))
-                                        put("kind", kotlinx.serialization.json.JsonPrimitive(job.kind))
-                                        put("label", kotlinx.serialization.json.JsonPrimitive(job.label))
-                                        put("status", kotlinx.serialization.json.JsonPrimitive(job.status))
-                                        put("startedAt", kotlinx.serialization.json.JsonPrimitive(job.startedAt))
-                                    },
-                                )
-                            }
-                        },
-                    )
-                }
-            },
+    private val capture = DshWire.json.parseToJsonElement(
+        checkNotNull(javaClass.getResourceAsStream("/job-list.json")).bufferedReader().readText(),
+    ).jsonObject
+
+    private val sessionId = (capture["sessionId"] as JsonPrimitive).content
+    private val frame = capture["frames"]!!.jsonArray.first()
+
+    private fun emptyRoster() = DshWire.json.parseToJsonElement("""{"type":"rows","jobs":[]}""")
+
+    @Test
+    fun a_roster_frame_carries_the_jobs_into_the_state() {
+        val state = AppState().withJobRows(sessionId, frame)
+        val rows = state.jobs.getValue(sessionId)
+        assertEquals(JobCodec.parseFrame(frame), rows)
+        assertTrue("the capture holds both kinds", rows.any { it.live } && rows.any { !it.live })
+        assertEquals(
+            "the live ones are what the button counts",
+            rows.filter { it.live }.map { it.id },
+            Jobs.live(rows).map { it.id },
         )
     }
 
     @Test
-    fun a_baseline_carries_the_jobs_into_the_state() {
-        val state = AppState().withControlBaseline(
-            baseline(
-                listOf(
-                    "s1" to listOf(
-                        HostJob("job-1", "bash", "sleep 300", "running", startedAt = 100),
-                        HostJob("job-2", "bash", "sleep 300", "completed", startedAt = 90, finishedAt = 95),
-                    ),
-                ),
-            ),
-        )
-        assertEquals(2, state.jobs["s1"]?.size)
-        assertEquals(listOf("job-1"), Jobs.live(state.jobs["s1"].orEmpty()).map { it.id })
+    fun a_roster_that_reports_no_jobs_takes_the_ones_it_had_away() {
+        val before = AppState().withJobRows(sessionId, frame)
+        assertTrue(before.jobs.containsKey(sessionId))
+        val after = before.withJobRows(sessionId, emptyRoster())
+        assertTrue("an empty roster is the removal", after.jobs.isEmpty())
     }
 
     @Test
-    fun a_baseline_that_reports_no_jobs_takes_the_ones_it_had_away() {
-        val before = AppState().withControlBaseline(
-            baseline(listOf("s1" to listOf(HostJob("job-1", "bash", "sleep 300", "running")))),
-        )
-        assertEquals(1, before.jobs["s1"]?.size)
-        val after = before.withControlBaseline(baseline(emptyList()))
-        assertTrue("a snapshot replaces, so the stale job list goes", after.jobs.isEmpty())
+    fun a_frame_that_is_not_a_roster_is_not_an_empty_roster() {
+        // `job/follow` streams one job's output over the same namespace, and a
+        // frame of that stream read as "no jobs" would empty the button.
+        val before = AppState().withJobRows(sessionId, frame)
+        val output = DshWire.json.parseToJsonElement("""{"type":"output","chunks":[],"next":0}""")
+        assertEquals(before, before.withJobRows(sessionId, output))
+    }
+
+    @Test
+    fun a_roster_is_filed_under_the_session_it_was_opened_for() {
+        // The stream is opened for the conversation on screen; a frame that lands
+        // after the reader has moved on must not be filed under the new session.
+        val state = AppState().withJobRows("other", frame)
+        assertNull(state.jobs[sessionId])
+        assertTrue(state.jobs.containsKey("other"))
     }
 }

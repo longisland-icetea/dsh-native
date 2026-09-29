@@ -1,0 +1,164 @@
+{
+ "note": "One session's `job/list` roster, read from a live 0.1.7 Host.",
+ "capturedAgainst": "http://127.0.0.1:3080",
+ "sessionId": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+ "frames": [
+  {
+   "type": "rows",
+   "jobs": [
+    {
+     "id": "bash-652",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 900 ./tools/run-jvm-tests.sh 2>&1 | tail -25",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655201926,
+     "finishedAt": 1790655228432,
+     "output": {
+      "total": 1112,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-658",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && export JAVA_HOME=$HOME/.local/jdk17 PATH=$HOME/.local/jdk17/bin:$PATH && M2=$HOME/.local/m2 && ANDROID_JAR=$HOME/.local/android-sdk/platforms/android-36/android.jar && CP=\"$(sed 's/$/:/' \"$M2/classpath.txt\" | tr -d '\\n')$ANDROID_JAR\" && java -cp \"/tmp/probe/stub:$CP:build/jvm-test/main:/tmp/probe/out\" io.github.longislandicetea.dshnative.ProbeKt 127.0.0.1 3080 session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655241244,
+     "finishedAt": 1790655306970,
+     "output": {
+      "total": 389,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-666",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && export JAVA_HOME=$HOME/.local/jdk17 PATH=$HOME/.local/jdk17/bin:$PATH && M2=$HOME/.local/m2 && ANDROID_JAR=$HOME/.local/android-sdk/platforms/android-36/android.jar && CP=\"$(sed 's/$/:/' \"$M2/classpath.txt\" | tr -d '\\n')$ANDROID_JAR\" && mkdir -p /tmp/probe/gen && cat > /tmp/probe/gen/BuildInfo.kt <<'EOF'\npackage io.github.longislandicetea.dshnative\n\ninternal object BuildInfo {\n    const val VERSION_NAME = \"0.0.0-probe\"\n    const val VERSION_CODE = 0\n}\nEOF\nfind app/src/main/java -name '*.kt' > /tmp/probe/main.list && echo /tmp/probe/gen/BuildInfo.kt >> /tmp/probe/main.list && $HOME/.local/kotlinc/bin/kotlinc -classpath \"$CP\" -jvm-target 17 -nowarn -Xplugin=\"$HOME/.local/kotlinc/lib/compose-compiler-plugin.jar\" -Xplugin=\"$HOME/.local/kotlinc/lib/kotlinx-serialization-compiler-plugin.jar\" -d /tmp/probe/mainapp @/tmp/probe/main.list 2>&1 | head -20; echo \"COMPILE DONE\"",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655394868,
+     "finishedAt": 1790655405116,
+     "output": {
+      "total": 13,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-671",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 900 ./tools/run-jvm-tests.sh 2>&1 | tail -30",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655440553,
+     "finishedAt": 1790655466673,
+     "output": {
+      "total": 1522,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-672",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 900 ./tools/run-jvm-tests.sh 2>&1 | tail -12",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655471539,
+     "finishedAt": 1790655497663,
+     "output": {
+      "total": 608,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-679",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && DSH_HOST=127.0.0.1 DSH_PORT=3080 timeout 1800 ./tools/live-harness.sh 2>&1 | tail -80",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655532424,
+     "finishedAt": 1790655616837,
+     "output": {
+      "total": 2229,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-700",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 900 ./tools/run-jvm-tests.sh 2>&1 | tail -6",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655664084,
+     "finishedAt": 1790655690382,
+     "output": {
+      "total": 224,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-703",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 1500 ./tools/build.sh 2>&1 | tail -20",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655706451,
+     "finishedAt": 1790655733323,
+     "output": {
+      "total": 1698,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-706",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 900 ./tools/run-jvm-tests.sh 2>&1 | tail -4",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655748038,
+     "finishedAt": 1790655763127,
+     "output": {
+      "total": 331,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-707",
+     "kind": "bash",
+     "label": "cd /home/cxxiao/dsh-native && timeout 900 ./tools/run-jvm-tests.sh 2>&1 | tail -4",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "completed",
+     "detail": "exit code: 0",
+     "startedAt": 1790655766969,
+     "finishedAt": 1790655793551,
+     "output": {
+      "total": 117,
+      "earliest": 0
+     }
+    },
+    {
+     "id": "bash-787",
+     "kind": "bash",
+     "label": "cat > /tmp/capture-jobs.mjs <<'EOF'\n#!/usr/bin/env node\n// Read one session's job roster (job/list), read-only.\nconst origin = (process.argv[2] ?? 'http://127.0.0.1:3080').replace(/\\/$/, '')\nconst sessionId = process.argv[3]\nconst wsUrl = origin.replace(/^http/, 'ws') + '/api/remote.mux'\nconst ws = new WebSocket(wsUrl)\nconst frames = []\nawait new Promise((res, rej) => {\n  ws.addEventListener('open', res, { once: true })\n  ws.addEventListener('error', (e) => rej(new Error(e.message ?? 'socket error')), { once: true })\n})\nws.send(JSON.stringify({\n  type: 'open', streamId: 'jl', endpoint: 'job/list',\n  payload: { args: { request: { sessionId } } },\n}))\nws.addEventListener('message', (event) => {\n  let msg\n  try { msg = JSON.parse(String(event.data)) } catch { return }\n  if (msg.type !== 'item') return\n  frames.push(msg.value)\n})\nawait new Promise((r) => setTimeout(r, 4000))\nconsole.log(JSON.stringify({ note: 'One session\\'s `job/list` roster, read from a live 0.1.7 Host.', capturedAgainst: origin, sessionId, frames }, null, 1))\nprocess.exit(0)\nEOF\ncd /tmp && timeout 60 node /tmp/capture-jobs.mjs http://127.0.0.1:3080 session-a8107455-26ab-4c3f-b77c-b811a814ad83 > /tmp/jobs-capture.json 2>/tmp/jobs-capture.err; echo \"EXIT=$?\"; head -c 1200 /tmp/jobs-capture.json; echo; cat /tmp/jobs-capture.err | head -3",
+     "owner": "session-a8107455-26ab-4c3f-b77c-b811a814ad83",
+     "status": "running",
+     "startedAt": 1790658126687,
+     "output": {
+      "total": 0,
+      "earliest": 0
+     }
+    }
+   ]
+  }
+ ]
+}

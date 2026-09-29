@@ -711,27 +711,13 @@ object FollowCodec {
     /**
      * The `inbox` projection inside a snapshot's projection bag.
      *
-     * Decoded by hand rather than through the strict serializer: this is a
-     * message list whose blocks this build does not model, and a shape it cannot
-     * read must yield "no inbox" instead of failing the whole snapshot -- which
-     * is what a strict decode of an unknown block did to the session list once.
+     * The same value arrives three ways -- a follow snapshot's `projections`, a
+     * `session/control` baseline's, and a `session/control` projection frame --
+     * so the decode lives in one place ([inboxProjection]) and this is only the
+     * path from the snapshot's shape to it.
      */
-    private fun inboxOf(projections: JsonElement?): InboxProjection? {
-        val bag = (projections as? JsonObject)?.get("values") as? JsonObject ?: return null
-        val inbox = bag["inbox"] as? JsonObject ?: return null
-        return InboxProjection(
-            nextTurn = inbox["next-turn"].toInboxMessages(),
-            nextStep = inbox["next-step"].toInboxMessages(),
-        )
-    }
-
-    private fun JsonElement?.toInboxMessages(): List<InboxMessage> =
-        (this as? JsonArray).orEmpty().mapNotNull { element ->
-            val message = element as? JsonObject ?: return@mapNotNull null
-            val id = (message["id"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
-            val source = message["source"] as? JsonObject
-            InboxMessage(id, (source?.get("rpcId") as? JsonPrimitive)?.contentOrNull)
-        }
+    private fun inboxOf(projections: JsonElement?): InboxProjection? =
+        inboxProjection((projections as? JsonObject)?.get("values") as? JsonObject)
 
     private fun eventOf(element: JsonElement?): SessionEvent? {
         val obj = element as? JsonObject ?: return null
@@ -757,8 +743,45 @@ data class InboxProjection(
     val nextStep: List<InboxMessage> = emptyList(),
 )
 
-/** One pending message, by the two identities a reply can be matched on. */
-data class InboxMessage(val id: String, val rpcId: String?)
+/** One pending message: the identities a reply is matched on, and its content. */
+data class InboxMessage(val id: String, val rpcId: String?, val content: JsonArray? = null)
+
+/**
+ * Read one `inbox` value -- the projection itself, not the bag holding it.
+ *
+ * Hand-decoded rather than through the strict serializer: this is a list of
+ * whole messages, whose blocks this build does not model, and a shape it cannot
+ * read has to yield "no inbox" instead of failing the snapshot or the control
+ * baseline that carried it -- which is what a strict decode of an unknown block
+ * did to the session list once.
+ */
+internal fun inboxProjection(inbox: JsonElement?): InboxProjection? {
+    val obj = inbox as? JsonObject ?: return null
+    return InboxProjection(
+        nextTurn = obj["next-turn"].toInboxMessages(),
+        nextStep = obj["next-step"].toInboxMessages(),
+    )
+}
+
+/**
+ * The messages one `inbox` list carries, wherever it came from.
+ *
+ * A durable `agent/inbox/spliced`'s `inserted` array holds the same message
+ * shape as the projection does, so both are read here: the mirror the splices
+ * maintain and the dock the projection draws must agree about what a pending
+ * message is.
+ */
+internal fun JsonElement?.toInboxMessages(): List<InboxMessage> =
+    (this as? JsonArray).orEmpty().mapNotNull { element ->
+        val message = element as? JsonObject ?: return@mapNotNull null
+        val id = (message["id"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+        val source = message["source"] as? JsonObject
+        InboxMessage(
+            id = id,
+            rpcId = (source?.get("rpcId") as? JsonPrimitive)?.contentOrNull,
+            content = message["content"] as? JsonArray,
+        )
+    }
 
 /** One content block inside a message. Only `text` is rendered as prose. */
 @Serializable

@@ -795,34 +795,98 @@ private class SessionViewStore(context: android.content.Context) {
  * Adopt one `session/control` baseline.
  *
  * A baseline is a *snapshot*: it carries an entry for every session, empty when
- * nothing is queued. It therefore **replaces** the queue map. Merging instead --
+ * nothing is pending. The queue therefore **replaces** the map. Merging instead --
  * which is what this did -- left a stale row behind for good: a steer the Host
  * claimed while this client's socket was down kept showing in the dock after
  * every reconnect, still claiming a message was waiting.
  *
  * The metrics stay a merge: those are numbers, and a stale number reads as a
  * number, while a stale queue row is a claim about work in flight.
+ *
+ * The queue itself now comes out of the session's own `inbox` projection. 0.1.7
+ * dropped the `queues` map the baseline used to carry beside the projections, so
+ * a client that kept reading it drew an empty dock while the Host held messages.
  */
 internal fun AppState.withControlBaseline(snapshot: JsonObject): AppState {
     val metrics = mutableMapOf<String, Metrics>()
+    val queues = mutableMapOf<String, List<QueuedItem>>()
     (snapshot["projections"] as? JsonObject)?.forEach { (sessionId, projection) ->
         val bag = (projection as? JsonObject)?.get("values") as? JsonObject
         val parsed = runCatching {
             DshWire.json.decodeFromJsonElement(ProjectionValues.serializer(), bag ?: JsonObject(emptyMap()))
         }.getOrNull()
         Metrics.from(parsed).takeUnless { it.isEmpty }?.let { metrics[sessionId] = it }
+        val pending = inboxProjection(bag?.get("inbox")).queueRows()
+        if (pending.isNotEmpty()) queues[sessionId] = pending
     }
-    val queues = mutableMapOf<String, List<QueuedItem>>()
-    (snapshot["queues"] as? JsonObject)?.forEach { (sessionId, items) ->
-        val parsed = QueueCodec.parse(items as? JsonArray)
-        if (parsed.isNotEmpty()) queues[sessionId] = parsed
+    return copy(metrics = this.metrics + metrics, queues = queues)
+}
+
+/**
+ * Fold one `session/control` frame into the per-session state it carries.
+ *
+ * Two frame kinds since 0.1.7: a `baseline` (every session's projection bag) and
+ * a `projection` (one key of one session, replaced). The `queue` and `jobs` frames
+ * of 0.1.5 are gone -- the queue is a projection, and the roster has its own
+ * stream -- so what is left here is a snapshot and a patch, which is why this is
+ * one function and not a `when` over five shapes.
+ */
+internal fun AppState.withControlFrame(frame: JsonElement): AppState {
+    val obj = frame as? JsonObject ?: return this
+    return when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+        "baseline" -> (obj["value"] as? JsonObject)?.let { withControlBaseline(it) } ?: this
+        "projection" -> withProjectionFrame(obj)
+        else -> this
     }
-    val jobs = mutableMapOf<String, List<HostJob>>()
-    (snapshot["jobs"] as? JsonObject)?.forEach { (sessionId, items) ->
-        val parsed = JobCodec.parse(items)
-        if (parsed.isNotEmpty()) jobs[sessionId] = parsed
+}
+
+/**
+ * One projection frame: the session's queue when the key is `inbox`, its numbers
+ * when it is one of the usage keys.
+ *
+ * The frame is that key's whole value, so it replaces what is known for it rather
+ * than merging -- which is the same rule the baseline follows, one key at a time.
+ */
+private fun AppState.withProjectionFrame(frame: JsonObject): AppState {
+    val sessionId = frame["sessionId"]?.jsonPrimitive?.contentOrNull ?: return this
+    val key = frame["key"]?.jsonPrimitive?.contentOrNull ?: return this
+    val value = frame["value"] ?: JsonNull
+    if (key == "inbox") {
+        val pending = inboxProjection(value).queueRows()
+        return copy(queues = if (pending.isEmpty()) queues - sessionId else queues + (sessionId to pending))
     }
-    return copy(metrics = this.metrics + metrics, queues = queues, jobs = jobs)
+    val parsed = runCatching {
+        DshWire.json.decodeFromJsonElement(
+            ProjectionValues.serializer(),
+            buildJsonObject { put(key, value) },
+        )
+    }.getOrNull() ?: return this
+    val incoming = Metrics.from(parsed)
+    if (incoming.isEmpty) return this
+    // One key per frame, so merge into what is already known rather than
+    // replacing: usage and pressure arrive separately.
+    val existing = metrics[sessionId] ?: Metrics()
+    return copy(
+        metrics = metrics + (sessionId to Metrics(
+            usage = incoming.usage ?: existing.usage,
+            pressure = incoming.pressure ?: existing.pressure,
+            breakdown = incoming.breakdown ?: existing.breakdown,
+            stats = incoming.stats ?: existing.stats,
+        )),
+    )
+}
+
+/**
+ * Adopt one `job/list` frame: the whole roster one session can see.
+ *
+ * Whole-set replacement, like the control baseline: an empty frame is the
+ * removal, because there is no per-job delta to apply. A roster is keyed by the
+ * session the stream was opened for, so a frame that arrives after the reader has
+ * moved to another session cannot be filed under the wrong one.
+ */
+internal fun AppState.withJobRows(sessionId: String, frame: JsonElement): AppState {
+    val rows = JobCodec.parseFrame(frame) ?: return this
+    return copy(jobs = if (rows.isEmpty()) jobs - sessionId else jobs + (sessionId to rows))
 }
 
 /**
@@ -970,6 +1034,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private var eventsJob: Job? = null
     private var workspaceJob: Job? = null
     private var controlJob: Job? = null
+    /** The open session's `job/list` stream; the roster it carries is the UI's. */
+    private var jobsJob: Job? = null
     /** Bound by the `$events` ready frame; every answer must name it. */
     private var eventClientId: String? = null
     /** The outbox worker, if it is running. */
@@ -1385,6 +1451,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         workspaceJob = null
         controlJob?.cancel()
         controlJob = null
+        jobsJob?.cancel()
+        jobsJob = null
         eventClientId = null
         _state.update { it.copy(pending = emptyList()) }
         client?.stop()
@@ -1452,17 +1520,18 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         openEvents(active)
         _state.value.conversation?.let { conversation ->
             openFollow(conversation.sessionId, conversation.title)
+            openJobs(active, conversation.sessionId)
         }
     }
 
     /**
-     * Follow the Host's live control state: queues, projections and jobs.
+     * Follow the Host's live control state: the projections a session is drawn
+     * from -- its pending input, its usage, how full the window is.
      *
      * Separate from the events stream because it is a different kind of fact. The
      * events stream says what happened (a waterfall to answer, a session's running
-     * flag); this says what a session's state *is* -- what is queued, how full the
-     * window is -- and its frames are complete snapshots rather than deltas, so a
-     * dropped frame is repaired by the next one.
+     * flag); this says what a session's state *is*, and its frames are complete
+     * values rather than deltas, so a dropped frame is repaired by the next one.
      */
     private fun openControl(active: DshClient) {
         controlJob?.cancel()
@@ -1476,69 +1545,36 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
         }
     }
 
-    /** Fold one `session/control` frame into the per-session state it carries. */
+    /** Fold one `session/control` frame, logging what a baseline turned out to hold. */
     private fun applyControl(value: JsonElement) {
+        _state.update { it.withControlFrame(value) }
         val obj = value as? JsonObject ?: return
-        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
-            "baseline" -> {
-                val snapshot = obj["value"] as? JsonObject ?: return
-                _state.update { it.withControlBaseline(snapshot) }
-                val usage = (snapshot["projections"] as? JsonObject)?.size ?: 0
-                val waiting = (snapshot["queues"] as? JsonObject)
-                    ?.count { (it.value as? JsonArray)?.isNotEmpty() == true } ?: 0
-                val working = (snapshot["jobs"] as? JsonObject)
-                    ?.count { (it.value as? JsonArray)?.isNotEmpty() == true } ?: 0
-                record(
-                    "control baseline: $usage sessions with usage, $waiting with a queue, $working with jobs",
-                )
-            }
-            // A queue frame is that session's whole queue, so an empty array is
-            // the removal -- there is no per-item delta to apply.
-            "queue" -> {
-                val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
-                val items = QueueCodec.parse(obj["items"] as? JsonArray)
-                _state.update {
-                    it.copy(queues = if (items.isEmpty()) it.queues - sessionId else it.queues + (sessionId to items))
+        if (obj["type"]?.jsonPrimitive?.contentOrNull != "baseline") return
+        val sessions = ((obj["value"] as? JsonObject)?.get("projections") as? JsonObject)?.size ?: 0
+        // Read back from the state rather than counted again here: the line is
+        // about what this client now believes, which is the thing worth seeing in
+        // the log when a dock looks wrong.
+        record("control baseline: $sessions sessions with projections, ${_state.value.queues.size} with pending input")
+    }
+
+    /**
+     * Follow one session's background-job roster.
+     *
+     * Its own stream: `job/list` answers with the whole set a session can see, on
+     * open and on every change, so a reconnect needs no separate read. Opened for
+     * the conversation that is on screen, because that is the only roster the UI
+     * draws -- the drawer's rows and the transcript do not show other sessions'
+     * jobs.
+     */
+    private fun openJobs(active: DshClient, sessionId: String) {
+        jobsJob?.cancel()
+        jobsJob = scope.launch(Dispatchers.IO) {
+            active.jobs(sessionId)
+                .asHostStream("jobs")
+                .collect { frame: MuxFrame ->
+                    if (frame !is MuxFrame.Item) return@collect
+                    _state.update { it.withJobRows(sessionId, frame.value) }
                 }
-            }
-            // A jobs frame is that session's whole job list, live ones included,
-            // so an empty array is the removal -- the same shape as a queue frame.
-            "jobs" -> {
-                val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
-                val parsed = JobCodec.parse(obj["jobs"])
-                _state.update { current ->
-                    if (parsed.isEmpty()) {
-                        current.copy(jobs = current.jobs - sessionId)
-                    } else {
-                        current.copy(jobs = current.jobs + (sessionId to parsed))
-                    }
-                }
-            }
-            "projection" -> {
-                val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
-                val key = obj["key"]?.jsonPrimitive?.contentOrNull ?: return
-                val parsed = runCatching {
-                    DshWire.json.decodeFromJsonElement(
-                        ProjectionValues.serializer(),
-                        buildJsonObject { put(key, obj["value"] ?: JsonNull) },
-                    )
-                }.getOrNull() ?: return
-                val incoming = Metrics.from(parsed)
-                if (incoming.isEmpty) return
-                _state.update { current ->
-                    // One key per frame, so merge into what is already known
-                    // rather than replacing: usage and pressure arrive separately.
-                    val existing = current.metrics[sessionId] ?: Metrics()
-                    current.copy(
-                        metrics = current.metrics + (sessionId to Metrics(
-                            usage = incoming.usage ?: existing.usage,
-                            pressure = incoming.pressure ?: existing.pressure,
-                            breakdown = incoming.breakdown ?: existing.breakdown,
-                            stats = incoming.stats ?: existing.stats,
-                        )),
-                    )
-                }
-            }
         }
     }
 
@@ -1858,6 +1894,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
             )
         }
         openFollow(session.sessionId, session.title)
+        client?.let { openJobs(it, session.sessionId) }
         loadCatalog()
         loadCommands(session.sessionId)
     }
@@ -1987,6 +2024,7 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                     // picker needs the catalog to name the default it is running.
                     loadCatalog()
                     openFollow(sessionId, "")
+                    openJobs(active, sessionId)
                 }
                 .onFailure { record("create session failed: ${it.message}") }
         }
@@ -1995,6 +2033,8 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     fun closeSession() {
         followJob?.cancel()
         followJob = null
+        jobsJob?.cancel()
+        jobsJob = null
         _state.update { it.copy(conversation = null, fold = null) }
     }
 
