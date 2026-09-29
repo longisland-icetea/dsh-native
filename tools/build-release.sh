@@ -15,8 +15,9 @@
 # ~/.local/r8. The Android default rules come from the same AGP artifact Gradle
 # feeds to R8.
 #
-#   ./tools/build-release.sh            # minified, signed with the debug key
-#   KEYSTORE=... KEYPASS=... ./tools/...  # a real release key
+#   ./tools/build-release.sh            # minified; the release key if this machine
+#                                       # has one, otherwise the debug key
+#   KEYSTORE=... KEYPASS=... ./tools/...  # a key passed in explicitly
 #
 # What this does NOT reproduce: Gradle's resource shrinking, and the release
 # signing secrets. It is a check on R8's effect, not a substitute for CI.
@@ -97,12 +98,26 @@ cp "$DEBUG_OUT/base.apk" "$OUT/unsigned.apk"
 ( cd "$OUT/classes" && zip -q -X -r "$OUT/unsigned.apk" ./*.dex META-INF )
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
-# The debug key exists only so `tools/build-release.sh` works out of the box. A real
-# release key is passed in, and then the password must be too: falling back to a
-# default password for someone else's keystore would look like a successful signing
-# run right up until the keystore refused it.
-KEYSTORE="${KEYSTORE:-$HOME/.local/dsh-native-debug.jks}"
-KEYALIAS="${KEYALIAS:-dshnative}"
+# Signing parameters, in order of precedence:
+#   1. the environment (KEYSTORE / KEYALIAS / KEYPASS), which is how CI and a build
+#      with somebody else's key pass them in;
+#   2. ~/.local/dsh-native-keys/keystore.properties, written by this machine's key
+#      rotation, so a release build needs no prompt and no exported secret;
+#   3. the debug key, which exists only so this script works out of the box.
+#
+# The password is only taken from (2) when the keystore also came from (2): a
+# password belonging to another key would look like a successful signing run right
+# up until the keystore refused it. With no password at all, apksigner asks.
+PROPERTIES="${DSH_KEYSTORE_PROPERTIES:-$HOME/.local/dsh-native-keys/keystore.properties}"
+property() { [ -f "$PROPERTIES" ] && sed -n "s/^$1=//p" "$PROPERTIES" | head -1 || true; }
+PROP_STORE_FILE="$(property release.storeFile)"
+PROP_KEY_ALIAS="$(property release.keyAlias)"
+PROP_STORE_PASS="$(property release.storePassword)"
+KEYSTORE="${KEYSTORE:-${PROP_STORE_FILE:-$HOME/.local/dsh-native-keys/dsh-native-debug.jks}}"
+KEYALIAS="${KEYALIAS:-${PROP_KEY_ALIAS:-dshnative}}"
+if [ -z "${KEYPASS:-}" ] && [ "$KEYSTORE" = "$PROP_STORE_FILE" ]; then
+  KEYPASS="$PROP_STORE_PASS"
+fi
 echo "== apksigner (keystore: $KEYSTORE)"
 
 # Prompt on the terminal rather than taking the password from an environment

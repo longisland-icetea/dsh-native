@@ -41,7 +41,7 @@ eval "$("$ROOT/tools/version.sh")"
 COMPOSE_PLUGIN="$KOTLIN_LIB/compose-compiler-plugin.jar"
 SERIALIZATION_PLUGIN="$KOTLIN_LIB/kotlinx-serialization-compiler-plugin.jar"
 OUT="$ROOT/build/manual"
-KEYSTORE="${KEYSTORE:-$HOME/.local/dsh-native-debug.jks}"
+KEYSTORE="${KEYSTORE:-$HOME/.local/dsh-native-keys/dsh-native-debug.jks}"
 KEYPASS="${KEYPASS:-android}"
 KEYALIAS="${KEYALIAS:-dshnative}"
 

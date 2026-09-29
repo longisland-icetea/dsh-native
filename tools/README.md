@@ -171,24 +171,35 @@ invoking R8 directly does not, so they live in `app/proguard-rules.pro`.
 
 ### Signing
 
-The script signs with the debug key by default, so it works out of the box. A real
-key is passed in, and then the password is asked for on the terminal rather than
-taken from `KEYPASS` — a password in the environment reaches `ps` and the shell
-history:
+Signing parameters come from three places, in this order:
 
-```sh
-KEYSTORE=~/.local/dsh-native-release.jks ./tools/build-release.sh
-```
+1. the environment (`KEYSTORE`, `KEYALIAS`, `KEYPASS`), which is how CI passes them in;
+2. `~/.local/dsh-native-keys/keystore.properties`, written by this machine's key
+   rotation — so a plain `./tools/build-release.sh` signs with the release key and
+   asks for nothing;
+3. the debug key at `~/.local/dsh-native-keys/dsh-native-debug.jks`, so the script
+   still works on a machine that has never had a release key.
 
-It prompts through `apksigner`, which needs no shell trickery to hide input; a
-`read -p` prompt would not work in zsh, whose `read` has no such option. `KEYPASS`
-still works and skips the prompt, for scripted builds.
+The password is taken from (2) only when the keystore did too: a password belonging
+to another key would look like a successful signing run right up until the keystore
+refused it. With no password at all, `apksigner` prompts on the terminal, and
+`KEYPASS` skips that prompt for scripted builds — a password in the environment
+reaches `ps` and the shell history, which is why it is not the default.
+
+The properties file is `chmod 600` and holds the password, which is the point: on
+this machine the release key and its password are the same secret, and where they
+live is written down in `~/DSH-NATIVE-SIGNING.md` rather than left to memory. That
+file is not part of this repository (a public checkout must not name it), and CI
+wants the same values in its secrets.
 
 `./tools/check-release-key.sh` answers the other question — *is this keystore the key
 that signed the published APK?* — before you find out from users who cannot install
 the update. Wrong key, wrong password and unknown alias each produce a distinct
-nonzero exit, and it takes `CERT_SHA256` to expect a different fingerprint. The
-keystore and its password are kept apart on purpose, so this gets asked eventually.
+nonzero exit, and it takes `CERT_SHA256` to expect a different fingerprint. It reads
+the password from the same properties file, and the certificate it expects is the one
+the 2026-09-29 rotation created: the key before that signed `v0.1.0` through
+`v0.1.12`, and an APK signed with either key cannot install over an app signed with
+the other.
 
 Both scripts assume the keystore and key passwords are the same, which is how CI's
 secrets are set up. If they ever diverge, pass `KEYPASS` and the key password

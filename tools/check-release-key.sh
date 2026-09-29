@@ -9,22 +9,27 @@
 # Usage:
 #   ./tools/check-release-key.sh [keystore] [alias]
 #
-# Defaults: ~/.local/dsh-native-release.jks, alias `dshnative`. Leave the alias empty
-# to check every entry. Set CERT_SHA256 to expect a different fingerprint.
+# Defaults: ~/.local/dsh-native-keys/dsh-native-release.jks, alias `dshnative`. Leave
+# the alias empty to check every entry. Set CERT_SHA256 to expect a different
+# fingerprint.
 #
-# The password is read by keytool from stdin: it is never an argument, never in the
-# environment, and never in the shell history.
+# The password comes from ~/.local/dsh-native-keys/keystore.properties -- the file
+# the key rotation wrote, readable only by this user -- so the check is one command
+# rather than one command plus a prompt. With no properties file, keytool asks on
+# the terminal, and the password is never an argument or an environment variable.
 
 set -euo pipefail
 
 # `${2-default}` and not `${2:-default}`: the colon form also substitutes on an
 # explicitly empty argument, which would make "check every entry" unreachable.
-KEYSTORE="${1-$HOME/.local/dsh-native-release.jks}"
+PROPERTIES="${DSH_KEYSTORE_PROPERTIES:-$HOME/.local/dsh-native-keys/keystore.properties}"
+KEYSTORE="${1-$HOME/.local/dsh-native-keys/dsh-native-release.jks}"
 ALIAS="${2-dshnative}"
 
-# The certificate of the v0.1.0 release. A keystore that does not match this can
-# still be a perfectly good key -- it is just not the key users already have.
-EXPECTED="${CERT_SHA256:-508da7362f15844cb519a3e25fb703ad564b51725ab1901f5da244f4f19be4e7}"
+# The certificate of the current release key (rotated 2026-09-29). A keystore that
+# does not match this can still be a perfectly good key -- it is just not the key
+# users already have, and one signed with it cannot install over their app.
+EXPECTED="${CERT_SHA256:-B0E86743F8028C9888D5F2EC3824DC7792891C832A628BD4506C9C7C8EEF982A}"
 norm() { printf '%s' "$1" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]'; }
 EXPECTED_NORM="$(norm "$EXPECTED")"
 
@@ -53,12 +58,19 @@ echo "alias:    ${ALIAS:-(every entry)}"
 echo "expected: $EXPECTED_NORM"
 echo
 
-# `-storepass` is omitted on purpose so keytool asks, on the terminal. Reading it
-# with a shell builtin would not work everywhere: zsh's `read` has no -p.
+# With no properties file, `-storepass` is omitted on purpose so keytool asks on the
+# terminal: reading it with a shell builtin would not work everywhere (zsh's `read`
+# has no -p), and a password on the command line would reach `ps`.
+STORE_PASS="${STOREPASS:-}"
+if [ -z "$STORE_PASS" ] && [ -f "$PROPERTIES" ]; then
+  STORE_PASS="$(sed -n 's/^release\.storePassword=//p' "$PROPERTIES" | head -1)"
+fi
+pass_args=()
+[ -n "$STORE_PASS" ] && pass_args=(-storepass "$STORE_PASS")
 alias_args=()
 [ -n "$ALIAS" ] && alias_args=(-alias "$ALIAS")
 
-output="$("$KEYTOOL" -list -v -keystore "$KEYSTORE" "${alias_args[@]}" 2>&1)" || {
+output="$("$KEYTOOL" -list -v -keystore "$KEYSTORE" "${pass_args[@]}" "${alias_args[@]}" 2>&1)" || {
   # keytool's failure output is a Java stack trace that buries the one line that
   # matters, so show it only when the cause is not the password.
   if ! printf '%s' "$output" | grep -q "password was incorrect"; then
@@ -69,8 +81,8 @@ output="$("$KEYTOOL" -list -v -keystore "$KEYSTORE" "${alias_args[@]}" 2>&1)" ||
   echo >&2
   echo "  If the password is right and this still fails, the keystore is not the one" >&2
   echo "  that password belongs to -- suspect the file, not the password." >&2
-  echo "  The pair that certainly exists is in CI:" >&2
-  echo "    gh secret list --repo longisland-icetea/dsh-native" >&2
+  echo "  This machine's key, alias and password are written down in:" >&2
+  echo "    ~/DSH-NATIVE-SIGNING.md" >&2
   exit 1
 }
 
