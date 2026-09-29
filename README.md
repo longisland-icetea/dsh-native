@@ -142,7 +142,7 @@ and how the rejected outline was caught.
 
 ## Protocol notes
 
-Four things about this harness are easy to get wrong, and each cost a bug here:
+Six things about this harness are easy to get wrong, and each cost a bug here:
 
 - **Event shapes come from the wire, never from a guess.** `docs/event-coverage.md`
   records where each one was observed, and the decoder tests pin them with captured
@@ -152,9 +152,21 @@ Four things about this harness are easy to get wrong, and each cost a bug here:
   `skill-catalog` are all machine-produced, and rendering them as user text puts
   words in the reader's mouth.
 - **The Host owns workspace grouping and the archive set**; the client renders what
-  `workspace/follow` reports, and archiving is one-way — there is no unarchive API.
+  `workspace/follow` reports. Archiving is reversible as of 0.1.7
+  (`workspace/unarchiveSession`, which this client does not call yet); sessions can
+  also be pinned.
 - **`session/create` takes `workspaceId` or `cwd`, never both**, and only the
   workspace route makes the new session a member of that group.
+- **An argument's name is part of the contract, and names get renamed.** The
+  gateway matches a call's fields against the endpoint descriptor before running
+  it — an argument the descriptor does not declare is a refusal, not something
+  ignored. `workspaceFiles/readBytes`'s byte window was `range` in 0.1.5 and is
+  `options` in 0.1.7, which is what broke image preview on the phone.
+- **Bytes do not travel inside the JSON.** A result field holding binary comes back
+  as a part of a `multipart/form-data` response: the value keeps the field with
+  `null` in it, and an `attachments` entry beside the result says which part fills
+  it (`[{path:["data"],codec:"bytes",part:"bytes-0"}]`). Reading only the JSON gets
+  a null; reading the body as JSON gets nothing at all.
 
 ## License
 

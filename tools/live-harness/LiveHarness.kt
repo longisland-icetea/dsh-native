@@ -40,6 +40,18 @@ import kotlin.system.exitProcess
  */
 private const val TIMEOUT_MS = 30_000L
 
+/**
+ * A real 8x8 PNG, spelled out because the harness writes a figure of its own.
+ *
+ * The bytes matter twice over: the byte read has to return this file *exactly*,
+ * and its IHDR and IDAT chunks contain CRLFs -- the sequence a multipart parser
+ * mistakes for the start of the next part if it is scanning for the boundary by
+ * hand rather than parsing the body.
+ */
+private val FIGURE_PNG: ByteArray = java.util.Base64.getDecoder().decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=",
+)
+
 /** What the harness observed, for the summary at the end. */
 private class Report {
     private val checks = mutableListOf<Triple<String, Boolean, String>>()
@@ -155,6 +167,30 @@ fun main(args: Array<String>): Unit = runBlocking {
             cut.getOrNull()?.truncated == true && cut.getOrNull()?.eof == false,
             "lines=${cut.getOrNull()?.lines} truncated=${cut.getOrNull()?.truncated}",
         )
+
+        // A figure is the one deliverable that takes *two* calls, and the sheet
+        // makes both: the text read refuses it as not-text, and the byte read is
+        // what actually draws it. Both halves are checked here because the
+        // interesting failures are silent -- the refusal is what routes the sheet
+        // to the byte endpoint at all, and a window of the wrong file decodes to
+        // a broken image rather than to an error.
+        val figure = scratch.resolve("figure.png")
+        val figureBytes = FIGURE_PNG
+        java.nio.file.Files.write(figure, figureBytes)
+        val asText = runCatching { direct.readWorkspaceFile(sessionId, figure.toString()) }
+        report.check(
+            "a figure is refused by the text read, which is what sends the sheet to the bytes",
+            asText.exceptionOrNull()?.message?.contains("not-text") == true,
+            asText.exceptionOrNull()?.message ?: "it answered text instead: ${asText.getOrNull()?.text?.take(20)}",
+        )
+        val asBytes = runCatching { direct.readWorkspaceBytes(sessionId, figure.toString()) }
+        report.check(
+            "a figure's bytes come back whole, byte for byte",
+            asBytes.getOrNull()?.contentEquals(figureBytes) == true,
+            "${asBytes.getOrNull()?.size ?: 0} of ${figureBytes.size} bytes; " +
+                asBytes.exceptionOrNull()?.message.orEmpty(),
+        )
+
         java.nio.file.Files.walk(scratch).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) }
     }
 

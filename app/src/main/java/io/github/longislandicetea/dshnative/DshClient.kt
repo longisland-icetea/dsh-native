@@ -30,12 +30,14 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartReader
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.Buffer
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -157,6 +159,16 @@ open class DshException(message: String, cause: Throwable? = null) : IOException
 internal const val RETRY_AFTER_MS = 150L
 
 /**
+ * The result field `workspaceFiles/readBytes` fills with the file's bytes.
+ *
+ * The field is named in two places on the wire -- the JSON key holding the null
+ * placeholder and the attachment path saying which part fills it -- and both
+ * spellings have to agree for the bytes to be found, so the name is written
+ * once here.
+ */
+private const val DATA_FIELD = "data"
+
+/**
  * Whether a failed unary call is worth one more attempt.
  *
  * A refusal is the Host's final word and repeating it would only delay saying
@@ -218,6 +230,89 @@ internal fun commandExecuteArgs(sessionId: String, line: String): JsonObject = b
     put("agentId", JsonPrimitive(sessionId))
     put("line", JsonPrimitive(line))
     put("submittedAttachments", buildJsonArray { })
+}
+
+/**
+ * The args `workspaceFiles/readBytes` takes.
+ *
+ * Named here, apart from the call, for the same reason `commands/execute`'s
+ * are: the failure this exists to prevent is a *name*, not logic. The gateway
+ * checks a call's fields against the endpoint's descriptor before running it, so
+ * a window spelled `range` -- which is what 0.1.5 called it, and what this
+ * client sent -- is refused outright by the 0.1.7 Host with
+ * `missing "options"; unexpected "range"`, and the preview sheet shows a
+ * protocol error where the figure should be.
+ *
+ * The empty window is the whole file: both fields are optional, and both
+ * omitted is what "read me this picture" means.
+ */
+internal fun byteReadArgs(sessionId: String, path: String): JsonObject = buildJsonObject {
+    put("workspaceFileScopeId", sessionId)
+    put("path", path)
+    put("options", buildJsonObject { })
+}
+
+/**
+ * One unary answer: the value the Host sent, and any binary it sent beside it.
+ *
+ * Both halves are kept because either may be the point -- a caller that reads
+ * JSON wants [value], and a caller that asked for a figure reads its bytes out
+ * of [bytesAt] -- and because the JSON alone cannot represent the second.
+ */
+internal class RpcAnswer(
+    val value: JsonElement?,
+    private val parts: Map<String, ByteArray>,
+    private val refs: List<RpcAttachmentRef>,
+) {
+    /**
+     * The bytes the Host put at one field of the value, or null when it sent
+     * none there.
+     *
+     * A declared attachment whose part is missing from the body is a null too:
+     * the envelope said where the bytes belong and the body did not carry them,
+     * which is a truncated answer, and the caller reports it as no bytes rather
+     * than as an empty file.
+     */
+    fun bytesAt(path: List<String>): ByteArray? =
+        refs.firstOrNull { it.path == path }?.let { parts[it.part] }
+}
+
+/**
+ * The named parts of one `multipart/form-data` body.
+ *
+ * OkHttp's own delimiter scan rather than a search for the boundary bytes: the
+ * boundary is the Host's to choose, the parts are binary, and finding where one
+ * ends is precisely what a real parser is for. A file whose own bytes happened
+ * to contain the boundary would break a hand-rolled scan and cannot break this
+ * one, because the format forbids the boundary from appearing in a part.
+ */
+internal object MultipartForm {
+    /** The part holding the JSON envelope; every other part is binary. */
+    const val METADATA_PART = "metadata"
+
+    fun parts(body: ByteArray, boundary: String): Map<String, ByteArray> {
+        val parts = LinkedHashMap<String, ByteArray>()
+        val reader = MultipartReader(Buffer().write(body), boundary)
+        while (true) {
+            val part = reader.nextPart() ?: break
+            // The name is a part's whole identity: the envelope's attachment
+            // list refers to parts by it, so a part that has none is one this
+            // client could never place.
+            val name = partName(part.headers["Content-Disposition"]) ?: continue
+            parts[name] = part.body.readByteArray()
+        }
+        return parts
+    }
+
+    /** The `name` parameter of one `Content-Disposition`, quoted or bare. */
+    private fun partName(header: String?): String? {
+        for (parameter in header?.split(';').orEmpty()) {
+            val trimmed = parameter.trim()
+            if (!trimmed.startsWith("name=", ignoreCase = true)) continue
+            return trimmed.substringAfter('=').trim().removeSurrounding("\"").takeIf { it.isNotEmpty() }
+        }
+        return null
+    }
 }
 
 /**
@@ -469,14 +564,25 @@ class DshClient(
      * may send it as a message instead. Folding it into an empty value -- which
      * the plain [call] does -- threw exactly that distinction away.
      */
-    suspend fun callOrNull(method: String, args: JsonObject): JsonElement? = withOneRetry(
+    suspend fun callOrNull(method: String, args: JsonObject): JsonElement? = callAnswer(method, args).value
+
+    /**
+     * The same call, keeping the binary parts an answer may carry beside its value.
+     *
+     * A result field the Host has no JSON spelling for -- a file's bytes -- comes
+     * back as a part of a `multipart/form-data` response, with the field left
+     * `null` in the JSON and an `attachments` entry saying which part fills it.
+     * Every other call still answers plain JSON, so this is the same request; only
+     * the decoding differs.
+     */
+    private suspend fun callAnswer(method: String, args: JsonObject): RpcAnswer = withOneRetry(
         what = method,
         onRetry = { error -> log("$method: ${error.message ?: error::class.simpleName}; retrying once") },
     ) {
         callOnce(method, args)
     }
 
-    private suspend fun callOnce(method: String, args: JsonObject): JsonElement? {
+    private suspend fun callOnce(method: String, args: JsonObject): RpcAnswer {
         val rpcId = UUID.randomUUID().toString()
         val body = json.encodeToString(RpcRequest(rpcId = rpcId, method = method, payload = RpcPayload(args)))
         val request = Request.Builder()
@@ -487,12 +593,28 @@ class DshClient(
         response.use {
             if (!it.isSuccessful) throw HostRefused("$method: HTTP ${it.code}")
             val raw = it.body?.bytes() ?: throw DshException("$method: empty body")
-            val text = decodeBody(raw).toString(Charsets.UTF_8)
+            val decoded = decodeBody(raw)
+            // The content type, not the bytes, says which envelope this is: a
+            // multipart body can begin with anything, since the boundary is the
+            // Host's to choose.
+            val boundary = it.body?.contentType()
+                ?.takeIf { type -> type.type == "multipart" && type.subtype == "form-data" }
+                ?.parameter("boundary")
+            val parts: Map<String, ByteArray>
+            val text: String
+            if (boundary == null) {
+                parts = emptyMap()
+                text = decoded.toString(Charsets.UTF_8)
+            } else {
+                parts = MultipartForm.parts(decoded, boundary)
+                text = parts[MultipartForm.METADATA_PART]?.toString(Charsets.UTF_8)
+                    ?: throw DshException("$method: a multipart answer with no ${MultipartForm.METADATA_PART} part")
+            }
             val parsed = json.decodeFromString<RpcResponse>(text)
             if (parsed.rpcId != rpcId) throw DshException("$method: rpcId mismatch")
             val result = parsed.result
             if (!result.ok) throw HostRefused("$method: ${result.error ?: "unknown error"}")
-            return result.value
+            return RpcAnswer(result.value, parts, RpcAttachmentCodec.refs(parsed.attachments))
         }
     }
 
@@ -665,24 +787,26 @@ class DshClient(
     }
 
     /**
-     * Read one file's raw bytes, base64 over the wire.
+     * Read one file's raw bytes.
      *
      * `read` refuses anything that is not UTF-8 -- which is correct for a text
      * endpoint and useless for a deliverable, since the deliverables worth
      * looking at are frequently figures. This path has no decoding and no
      * rejection, so an image can be rendered from it.
+     *
+     * The bytes do not come back inside the JSON: the value carries
+     * `"data": null` and an `attachments` entry names the part of the multipart
+     * body that fills it (`[{path:["data"],codec:"bytes",part:"bytes-0"}]`,
+     * captured from a 0.1.7 Host), which is what [RpcAnswer.bytesAt] puts back
+     * together. A 0.1.5 Host answered with the same window base64-encoded inside
+     * `data` -- and renamed the window's argument in the release that moved the
+     * bytes out -- so a call shaped for one Host is refused by the other. This
+     * speaks the Host it is pointed at rather than guessing from an empty field.
      */
     suspend fun readWorkspaceBytes(sessionId: String, path: String): ByteArray {
-        val args = buildJsonObject {
-            put("workspaceFileScopeId", sessionId)
-            put("path", path)
-            put("range", buildJsonObject { })
-        }
-        val value = call("workspaceFiles/readBytes", args)
-        val obj = value as? JsonObject ?: throw DshException("readBytes: unexpected result")
-        val data = obj["data"]?.jsonPrimitive?.contentOrNull
-            ?: throw DshException("readBytes: no data in result")
-        return android.util.Base64.decode(data, android.util.Base64.DEFAULT)
+        val answer = callAnswer("workspaceFiles/readBytes", byteReadArgs(sessionId, path))
+        return answer.bytesAt(listOf(DATA_FIELD))
+            ?: throw DshException("readBytes: the result carried no bytes for \"$DATA_FIELD\"")
     }
 
     /**

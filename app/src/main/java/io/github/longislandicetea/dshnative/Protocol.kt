@@ -15,7 +15,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 /**
- * The DSH Remote wire protocol, as measured against a live 0.1.5-rc.1 host.
+ * The DSH Remote wire protocol, as measured against live hosts from 0.1.5-rc.1
+ * to 0.1.7-rc.2.
  *
  * Unary calls are plain HTTP POSTs to `/api/<namespace>/<method>` carrying
  * `{type,rpcId,method,payload:{args}}`; every stream shares one WebSocket at
@@ -28,6 +29,12 @@ import kotlinx.serialization.json.longOrNull
  * A `SessionAddress` is a discriminated union, not `{sessionId,cwd}`:
  *  - `{kind:"session", sessionId}`
  *  - `{kind:"subagent", parentSessionId, childSessionId, mode}`
+ *
+ * An argument's *name* is part of the contract and the Host renames them
+ * between releases: 0.1.5 spelled `workspaceFiles/readBytes`'s window `range`,
+ * 0.1.7 spells it `options`, and a name the descriptor does not declare is
+ * refused before the call runs. `tools/live-harness.sh` is how each one is
+ * checked against the Host this client is pointed at.
  */
 object DshWire {
     const val API_PREFIX = "/api"
@@ -58,7 +65,56 @@ data class RpcResponse(
     val type: String,
     val rpcId: String,
     val result: RpcResult,
+    /**
+     * Binary parts that travelled beside the value rather than inside it.
+     *
+     * Typed as the raw element and decoded by [RpcAttachmentCodec] on purpose:
+     * a strict serializer would turn an addition to *this* list -- a path
+     * segment that is a number rather than a name, say -- into a failed call,
+     * which is the same trap the hand-written result decoders exist to avoid.
+     */
+    val attachments: JsonElement? = null,
 )
+
+/**
+ * Where one binary part belongs inside a result value.
+ *
+ * A result field the Host cannot put in JSON -- the bytes of a figure -- is
+ * sent as its own part of the response, and the JSON carries `null` in its
+ * place plus this reference saying which field that part fills. [path] is
+ * relative to the result's `value`: `["data"]` means `value.data`.
+ */
+data class RpcAttachmentRef(val part: String, val path: List<String>)
+
+/**
+ * Read the `attachments` list an envelope announces.
+ *
+ * Anything that is not a `bytes` attachment with a named part and a path of
+ * names is skipped rather than refused: this list is the Host's, the entries
+ * this client understands are the ones it fills, and an entry it does not
+ * understand is not a reason to lose the answer that came with it. A path with a
+ * number in it -- an array index, which no result this client reads has -- is
+ * skipped for the same reason: [RpcAnswer.bytesAt] names a field, and a field
+ * this client cannot name is one it cannot ask for.
+ */
+object RpcAttachmentCodec {
+    fun refs(attachments: JsonElement?): List<RpcAttachmentRef> {
+        val entries = attachments as? JsonArray ?: return emptyList()
+        return entries.mapNotNull { entry ->
+            val obj = entry as? JsonObject ?: return@mapNotNull null
+            val codec = (obj["codec"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            if (codec != "bytes") return@mapNotNull null
+            val part = (obj["part"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?: return@mapNotNull null
+            val segments = obj["path"] as? JsonArray ?: return@mapNotNull null
+            val path = segments.mapNotNull { segment ->
+                (segment as? JsonPrimitive)?.takeIf { it.isString }?.content
+            }
+            if (path.size != segments.size) return@mapNotNull null
+            RpcAttachmentRef(part, path)
+        }
+    }
+}
 
 @Serializable
 data class RpcResult(

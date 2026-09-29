@@ -992,3 +992,78 @@ One unrelated check was fixed on the way. The harness waited for the transient
 that message arrived (in a snapshot rather than as a live event) the echo was
 retired inside a single 200 ms poll. It now watches the row's whole life, as the
 steer check above it already had to — the same lesson, applied the second time.
+
+## Read a figure's bytes from beside the JSON, under the name the descriptor declares
+
+Image preview broke the day the Host updated, and it took two changes in one
+release to empty the sheet. `workspaceFiles/readBytes` had always spelled its byte
+window `range`; 0.1.7 spells it `options`, and the gateway checks a call's fields
+against the endpoint's descriptor *before* running it — so the read of a figure was
+refused with `missing "options"; unexpected "range"` and the file was never opened.
+The same release stopped putting the bytes in the JSON at all: the value now
+carries `"data": null`, and an `attachments` entry beside the result names the part
+of the response body that fills it (`[{path:["data"],codec:"bytes",
+part:"bytes-0"}]`, captured from a live 0.1.7 Host). Either change alone was enough
+to break the sheet; together they made "no data in result" the kindest thing the
+old code could have said.
+
+Both are now read the way the Host sends them. The window is named once, in
+`byteReadArgs` next to `commands/execute`'s args, because this bug was a name and
+not logic — the same shape of mistake as the missing `submittedAttachments` that
+made every slash command fail. And a body whose content type is
+`multipart/form-data` is split into its parts, with the `metadata` part decoded as
+the very same `RpcResponse` envelope every other call answers with; from there the
+only difference is that a call may come back carrying bytes as well as a value.
+`RpcAnswer` keeps the two together and `bytesAt(["data"])` is how the byte read asks
+for its window. The field is spelled once (`DATA_FIELD`) because two things on the
+wire have to agree about it: the JSON placeholder and the attachment path.
+
+Two decisions are worth their words. The split is OkHttp's `MultipartReader` rather
+than a scan for the boundary: the boundary is the Host's to choose, the parts are
+binary, and the PNG this was tested against holds a CRLF inside its own IHDR chunk —
+precisely the sequence a hand-rolled scan mistakes for the start of the next part.
+And `attachments` is decoded by hand rather than typed: an entry with an array index
+in its path, or a codec this client has never heard of, has to be a skipped entry
+rather than a failed call, which is the rule the other hand-written decoders follow.
+
+### The Markdown preview was never broken, which is worth knowing rather than assuming
+
+A phone shows one symptom — "the preview is empty" — but the two deliverables do not
+travel the same way. A document goes through `workspaceFiles/read`, whose descriptor
+did not change and whose answer is still JSON with `text` in it. A figure is the one
+deliverable that takes *two* calls: `read` refuses it as `workspace-file/not-text` —
+which is what routes the sheet to the byte endpoint at all — and only the second call
+was broken. Measured against the live Host before the fix was written: the markdown
+read returned the file, the figure read returned `not-text`, and the byte read
+returned the refusal above. So this change touches no markdown code, and the
+suspicion that both were down is recorded here as the thing a check settles rather
+than an argument.
+
+### What is tested where
+
+The decode is unit tested in `WorkspaceFileBytesTest`, and its payload is the Host's
+own answer: `app/src/test/resources/read-bytes-multipart.bin` is a captured
+`readBytes` response, body and all, and the bytes inside it are compared against the
+figure the test spells out in hex — so a parser that returned the right *length* of
+the wrong bytes fails. Alongside it: the window's name, a JSON answer that carries no
+bytes (which must not read as an empty file), attachments this client cannot place,
+and a part named with and without quotes.
+
+`tools/live-harness.sh` gained the two checks that would have caught this on the day
+the Host updated: a figure is refused by the text read, and the figure's bytes come
+back byte for byte. The harness already drove a markdown deliverable, a source
+deliverable and the page cap — all still passing on the new Host — and that is
+exactly why the break was invisible to it: nothing in it had ever asked for a figure.
+
+### What this did not fix
+
+One harness check is still red on the new Host, and it is a second, unrelated break
+from the same update: a steer that never appears in the queue dock. `session/control`'s
+baseline no longer carries `queues` or `jobs` at all — read from the live Host through
+this app's own client, the baseline is `{projections}`, and a session's pending work now
+lives in its `inbox` projection as `{next-turn, next-step}` — while
+`withControlBaseline` still reads `snapshot["queues"]` and the frame decoder still waits
+for `"queue"` and `"jobs"` frames. Usage and context pressure survive because they were
+already read out of `projections`; the queue dock and the job list do not. That is its
+own change, with its own captures of the `inbox` shape and of a splice, and it is not in
+this one.
