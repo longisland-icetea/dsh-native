@@ -142,6 +142,106 @@ class EventDecodeTest {
     }
 
     @Test
+    fun `the agent preset names itself`() {
+        assertEquals(
+            "standard",
+            EventPayload.presetChoice(
+                event("""{"type":"agent-preset/selected","seq":4,"time":0,"data":{"agentPreset":"standard"}}"""),
+            ),
+        )
+        assertNull(
+            EventPayload.presetChoice(
+                event("""{"type":"agent-preset/selected","seq":4,"time":0,"data":{}}"""),
+            ),
+        )
+    }
+
+    @Test
+    fun `a retry reads as one line about the stalled attempt`() {
+        // Copied from a session that stalled on the transport: attempt 1 of 5.
+        assertEquals(
+            "retrying (attempt 1 of 5) after TRANSPORT: DeepSeek Messages transport failed",
+            EventPayload.retryAttempt(
+                event(
+                    """{"type":"llm/retry","seq":3685,"time":0,"data":{"retryId":"41cc6cf7-1e3c-4e25-be3e-7d28f458aeba",
+                       "turn":17,"step":38,"provider":"deepseek-official","mode":"normal",
+                       "policyKey":"[\"normal\",5,[\"EMPTY_RESPONSE\",\"RATE_LIMIT\"],500,10000,0.1]",
+                       "retry":1,"maxRetries":5,"delayMs":458.9688524694306,
+                       "failure":{"message":"DeepSeek Messages transport failed","code":"TRANSPORT"}}}""",
+                ),
+            ),
+        )
+        // A payload missing the counters still says what it can: the failure is
+        // the part a reader is waiting for.
+        assertEquals(
+            "retrying after SERVER",
+            EventPayload.retryAttempt(
+                event("""{"type":"llm/retry","seq":1,"time":0,"data":{"failure":{"code":"SERVER"}}}"""),
+            ),
+        )
+    }
+
+    @Test
+    fun `a goal says what it now is, and how it ended`() {
+        // Copied from a session where a goal was created mid-conversation.
+        assertEquals(
+            "goal set: finish the audit",
+            EventPayload.goalChange(
+                event(
+                    """{"type":"goal/change","seq":1803,"time":0,"data":{"kind":"goal/change","version":1,
+                       "operation":"create","goal":{"id":"goal-73efad2e","revision":1,
+                       "objective":"finish the audit","phase":"active","maxGoalRounds":12},
+                       "roundsStarted":0,"createdAt":1,"updatedAt":1}}""",
+                ),
+            ),
+        )
+        // A blocked goal is explained by its reason, not by the objective it was
+        // already carrying when it was set.
+        assertEquals(
+            "goal blocked: three rounds made no progress",
+            EventPayload.goalChange(
+                event(
+                    """{"type":"goal/change","seq":9,"time":0,"data":{"kind":"goal/change","version":1,
+                       "operation":"block","goal":{"id":"goal-73efad2e","revision":3,
+                       "objective":"finish the audit","phase":"blocked",
+                       "blockedReason":{"code":"NO_PROGRESS","message":"three rounds made no progress"}},
+                       "roundsStarted":3,"createdAt":1,"updatedAt":2}}""",
+                ),
+            ),
+        )
+        // `clear` writes a tombstone instead of a goal, so there is nothing to
+        // quote -- the operation itself is the whole fact.
+        assertEquals(
+            "goal cleared",
+            EventPayload.goalChange(
+                event(
+                    """{"type":"goal/change","seq":10,"time":0,"data":{"kind":"goal/change","version":1,
+                       "operation":"clear","cleared":{"id":"goal-73efad2e","revision":4},"clearedAt":2}}""",
+                ),
+            ),
+        )
+        // The second half of the pair a real session wrote: the same goal, now
+        // finished. Its objective is long, so what reaches the row is truncated.
+        val completed = EventPayload.goalChange(
+            event(
+                """{"type":"goal/change","seq":3488,"time":0,"data":{"kind":"goal/change","version":1,
+                   "operation":"complete","goal":{"id":"goal-73efad2e-3c45-4efa-9512-51347ec75d76","revision":2,
+                   "objective":"按用户 2026-09-27 定案完成第七轮审计剩余项：(A1/A2) 把\"允许融资\"改为\"不借现金、卖沽义务可超现金、90% 比例控杠杆\"的正确表述；(B) M7 未持有期权挂单致 -inf、文字全量对账、引擎层时点/补价诚实化、守护进程重试语义与状态级去重；(C) 研究护栏（闸门与回测同源、无套利网格、full_scan 隐式丢弃与结论矛盾、结构性零）；(D) 测试体系（补 guard.py 11 条 fail-closed 用例、减少源码文本锁、selftest or True）；(E) 低危 16 条。每项都要跑通全量验收（回归/安全/研究/verify_docs/calibrate --check）。",
+                   "phase":"complete","maxGoalRounds":12},"roundsStarted":1,
+                   "createdAt":1790514981677,"updatedAt":1790519248671}}""",
+            ),
+        )
+        assertTrue("a goal line stays one line: $completed", completed != null && completed.length <= "goal complete: ".length + 120)
+        assertTrue("and says what happened: $completed", completed!!.startsWith("goal complete: 按用户 2026-09-27"))
+        // No operation, no row: this decoder is not the place to guess.
+        assertNull(
+            EventPayload.goalChange(
+                event("""{"type":"goal/change","seq":11,"time":0,"data":{"kind":"goal/change","version":1}}"""),
+            ),
+        )
+    }
+
+    @Test
     fun `a message with no text block produces no reply`() {
         val reasoningOnly = event(
             """{"type":"assistant/message","seq":9,"time":0,

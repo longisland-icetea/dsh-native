@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -816,6 +817,9 @@ data class WireMessage(
 object EventPayload {
     private val json = DshWire.json
 
+    /** How much of a long objective or provider message a one-line note keeps. */
+    private const val NOTE_CHARS = 120
+
     private fun blocksOf(element: JsonElement?): List<ContentBlock> {
         val obj = element as? JsonObject ?: return emptyList()
         val container = (obj["message"] as? JsonObject) ?: obj
@@ -956,6 +960,87 @@ object EventPayload {
         val model = (data["model"] as? JsonPrimitive)?.contentOrNull ?: return null
         val provider = (data["provider"] as? JsonPrimitive)?.contentOrNull ?: ""
         return ModelChoice(provider, model, (data["reasoningEffort"] as? JsonPrimitive)?.contentOrNull)
+    }
+
+    /**
+     * `agent-preset/selected` as the preset's own name.
+     *
+     * The preset is what decides the tools, skills and instructions a session
+     * runs with -- the reason two sessions behave differently on the same Host --
+     * and nothing else on screen says which one this is. One line, like the model
+     * chip: the setting is worth knowing, not worth a card.
+     */
+    fun presetChoice(event: SessionEvent): String? {
+        val data = event.data as? JsonObject ?: return null
+        return (data["agentPreset"] as? JsonPrimitive)?.contentOrNull?.trim()?.ifEmpty { null }
+    }
+
+    /**
+     * `goal/change` as the line that says what the session's goal just did.
+     *
+     * The harness keeps its goal outside the conversation, and this client has no
+     * goal bar (see `docs/web-parity.md`), so the transcript is the only place a
+     * reader can watch one being set, rewritten, paused, resumed, completed,
+     * blocked or cleared. The objective travels with the event, and it is the half
+     * that answers "working toward *what*" -- `goal set` alone would answer
+     * nothing -- so it is truncated rather than dropped.
+     *
+     * Operations are the whole set the durable decoder accepts: `create`, `edit`,
+     * `pause`, `resume`, `complete`, `block`, `clear`.
+     */
+    fun goalChange(event: SessionEvent): String? {
+        val data = event.data as? JsonObject ?: return null
+        val operation = (data["operation"] as? JsonPrimitive)?.contentOrNull ?: return null
+        val goal = data["goal"] as? JsonObject
+        val objective = (goal?.get("objective") as? JsonPrimitive)?.contentOrNull
+            ?.lineSequence()?.joinToString(" ")?.trim()?.take(NOTE_CHARS)?.ifEmpty { null }
+        val verb = when (operation) {
+            "create" -> "set"
+            "edit" -> "edited"
+            "pause" -> "paused"
+            "resume" -> "resumed"
+            "complete" -> "complete"
+            "block" -> "blocked"
+            "clear" -> "cleared"
+            else -> operation
+        }
+        // A blocked goal is explained by its reason, not by the objective it was
+        // already carrying when it was set.
+        val said = if (operation == "block") {
+            ((goal?.get("blockedReason") as? JsonObject)?.get("message") as? JsonPrimitive)
+                ?.contentOrNull?.lineSequence()?.joinToString(" ")?.trim()?.take(NOTE_CHARS)?.ifEmpty { null }
+        } else {
+            objective
+        }
+        return if (said == null) "goal $verb" else "goal $verb: $said"
+    }
+
+    /**
+     * `llm/retry` as the one line a stalled turn deserves.
+     *
+     * A provider failure is invisible otherwise: the reply simply stops coming,
+     * and when it resumes nothing says it ever paused. The Host logs *two* events
+     * per attempt -- this one, carrying which attempt it is and what failed, and
+     * `llm/retry-started` when the next request actually goes out -- which is one
+     * fact for a reader, so `toItem` folds the second away instead of drawing a
+     * second line.
+     */
+    fun retryAttempt(event: SessionEvent): String? {
+        val data = event.data as? JsonObject ?: return null
+        val attempt = (data["retry"] as? JsonPrimitive)?.intOrNull
+        val max = (data["maxRetries"] as? JsonPrimitive)?.intOrNull
+        val failure = data["failure"] as? JsonObject
+        val code = (failure?.get("code") as? JsonPrimitive)?.contentOrNull
+        val message = (failure?.get("message") as? JsonPrimitive)?.contentOrNull
+            ?.lineSequence()?.firstOrNull()?.trim()?.take(NOTE_CHARS)?.ifEmpty { null }
+        val count = if (attempt != null && max != null) " (attempt $attempt of $max)" else ""
+        val why = when {
+            code != null && message != null -> " after $code: $message"
+            code != null -> " after $code"
+            message != null -> " after $message"
+            else -> ""
+        }
+        return "retrying$count$why"
     }
 
     /** A session-scoped setting change the transcript is worth marking. */

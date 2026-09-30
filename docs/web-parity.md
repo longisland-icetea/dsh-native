@@ -122,8 +122,10 @@ is a scroll; search is the feature that makes the list usable again.
 
 - **`llm/retry` status.** The web shows "Waiting to retry model request",
   "Retrying model request ({retry}/{maximum}) · {seconds}s" and a failure reason.
-  The app does not handle `llm/retry` at all, so a retrying request looks like a
-  stall.
+  The app draws one note per failed attempt now — `retrying (attempt 1 of 5) after
+  TRANSPORT: …`, which is the reason and the count — but it is a line in the
+  transcript rather than a status: neither the wait before the next attempt nor
+  the countdown during it has a surface.
 - **Plan review presentation.** The app infers a plan review from a heuristic
   (one question, has `detail`, at most two options, not multi-select). The web
   requires `intent.kind === 'plan-review'`, the approve label from `intent.approve`,
@@ -149,7 +151,9 @@ is a scroll; search is the feature that makes the list usable again.
   subagents of the open session with a jump into the child session. The web's
   version also has a reminder catalog, per-row subagent tokens and duration, a
   workflow-run panel, and a goal bar with pause/resume/edit/clear, none of which
-  the app has.
+  the app has. It does show `goal/change` as a transcript note, so a goal set,
+  rewritten, paused, resumed, completed, blocked or cleared leaves a line where the
+  reader is already looking — reading the goal, though, not steering it.
 - **Access mode.** The web switches the permission preset per session
   (`/permission`, with a risk-confirmation dialog for Full access) and sets the
   default for new sessions. The app shows `permission/preset` as a note but cannot

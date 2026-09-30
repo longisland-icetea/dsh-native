@@ -23,6 +23,9 @@ Column meanings:
 | `todo/write` | todo card | the plan is the most useful thing to re-read mid-turn |
 | `deliverables/presented` | deliverables card, each row opening a preview | the whole point of a turn is what it produced |
 | `model/selection` | model chip | answers "which model is this" without opening settings |
+| `agent-preset/selected` | one note: `agent preset: <name>` | the preset decides the tools, skills and instructions a session runs with, which is why two sessions behave differently on one Host; nothing else on screen says which one this is |
+| `goal/change` | one note: what the goal just did, with its objective truncated | the goal lives outside the conversation and this client has no goal bar (see `web-parity.md`), so this line is the only surface a reader can watch it on |
+| `llm/retry` | one note: `retrying (attempt n of m) after CODE: message` | a provider failure is otherwise invisible — the reply stops arriving and nothing says it paused. One row per attempt, not two: `llm/retry-started` is the same fact |
 | `turn/end` | note when it carries a reason | a failed turn otherwise ends silently |
 | `compaction/*` | compaction boundary note | the transcript has no other marker that history was summarized away |
 
@@ -55,30 +58,29 @@ messages and settle notices to the human bubble.
 | `permission/preset`, `sandbox/mode`, `approval/policy` | session configuration, not conversation; belongs in a settings surface |
 | `session/title`, `session/title-llm-request` | the title is already in the drawer and the top bar |
 | `session-log-deepseek/*` | the transport reporting on itself: the upload acknowledges its own delivery once per **step**, so any row here is a row under every message. Hidden as a namespace, not as the one name caught leaking in a 2026-09 update — the whole package only ever logs this kind of bookkeeping. Pinned by `EventVisibilityTest` |
+| `system/message` | the system prompt, addressed to the model. The fallback drew it as a row with the first 400 characters of that prompt hanging off it |
+| `developer/message` | the harness telling the model its own tool list changed (`tool-removal: ralph`); the tool surface has a settings-shaped home, not a transcript one |
+| `web/deepseek-search-llm-request` | the request body of the harness's own web search; the search itself is already a tool card |
+| `workspace/changes` | a `{turn}` marker that a turn touched the workspace; which files changed is in the tool cards and the deliverables card, where the paths are |
+| `subagent/catalog`, `subagent/descriptor`, `subagent/model-selection-policy` | the subagent roster's own bookkeeping; the dock draws that roster from its own stream, with labels, tokens and a jump into the child |
+| `llm/retry-started` | the second half of a retry: `llm/retry` above it already said an attempt failed and another is coming. Two events, one fact, one row |
 | `assistant/attempt` stream | see above |
 
-## Observed, but with no branch of its own
+## Observed and unclassified
 
-Emitted by the harness, seen in the census, and unhandled by `toItem`: each one
-becomes an activity row naming its own type. That is the fallback working as
-designed — it exists so an event this build does not know stays *visible* instead
-of being silently skipped, and it is how the delivery watermark was caught — but
-it is not a decision anyone made per type, and for `system/message` the row drags
-400 characters of system prompt into the conversation with it.
+None, as of the census above. Every type the harness was seen to write now has a
+branch of its own: rendered, hidden, or — for `llm/retry`, `goal/change` and
+`agent-preset/selected` — a note. A row census over nine real logs, folding each
+one through `toItem` and tallying rows per type, leaves nothing falling through
+the fallback: the six logs that carried delivery watermarks held 1477 of them
+between them, and now draw no rows at all.
 
-| type | rows today | what the row says |
-|---|---|---|
-| `system/message` | one per session, more on a re-seeded one | its type name, then 400 characters of the system prompt |
-| `web/deepseek-search-llm-request` | one per web search | its type name |
-| `llm/retry`, `llm/retry-started` | one per retry attempt | its type name; one sampled session held 28 of each |
-| `workspace/changes` | one per turn that wrote files | its type name |
-| `subagent/catalog`, `subagent/descriptor`, `subagent/model-selection-policy` | one or two per session | its type name |
-| `developer/message` | rare | its type name |
-| `goal/change`, `agent-preset/selected` | rare | its type name |
-
-Whether each becomes a note, a card, or nothing is still open — hiding the list
-wholesale is exactly what `EventVisibilityTest` pins *against*, because an
-unclassified type is also how a newly shipped feature gets noticed at all.
+That is a moment, not a guarantee. The fallback stays loud on purpose: an
+out-of-repo plugin's event is not conversation either, but silently dropping an
+event type this build has never seen is how a whole feature goes missing, and
+`EventVisibilityTest` pins that half of the contract. When the next upstream
+update lands, the type census will show a new name immediately; the row census is
+what says whether a reader sees it.
 
 Never observed in the census, so out of scope until one shows up:
 `approval/asked`, `approval/decided`, `feedback/*`, `hook/invoked`,

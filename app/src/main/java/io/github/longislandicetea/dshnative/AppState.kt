@@ -2214,6 +2214,15 @@ internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): Transcr
             val effort = choice.effort?.let { " · $it" } ?: ""
             TranscriptItem.Note(key, "model: ${choice.provider}/${choice.model}$effort")
         }
+        "agent-preset/selected" -> EventPayload.presetChoice(event)?.let {
+            TranscriptItem.Note(key, "agent preset: $it")
+        }
+        // The goal lives outside the conversation and this client has no goal
+        // bar, so the transcript is the only surface a reader can watch it on.
+        "goal/change" -> EventPayload.goalChange(event)?.let { TranscriptItem.Note(key, it) }
+        // A retry is a stall with a reason: without this line the reply just
+        // stops arriving and nothing says the provider refused a request.
+        "llm/retry" -> EventPayload.retryAttempt(event)?.let { TranscriptItem.Note(key, it) }
         // A command's own record of itself: what was asked, and what came of it.
         // Without these the reader saw nothing at all -- a command's reply is not
         // a message, so nothing else in the transcript would ever show it.
@@ -2233,6 +2242,19 @@ internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): Transcr
         // the seed marker carries nothing.
         "assistant/attempt", "session/end-seed", "session/title",
         "session/title-llm-request", "compaction/summary", "compaction/prune",
+        // Machinery addressed to the model, not to the reader: the system prompt
+        // itself (which the fallback below would otherwise drag in 400 characters
+        // at a time), the tool-registry edits that tell the model a tool appeared
+        // or vanished, the harness's own web-search request body, the marker that
+        // a turn touched the workspace, and the subagent roster's bookkeeping --
+        // the dock draws that roster from its own stream. Each of these said
+        // nothing but its own type name.
+        "system/message", "developer/message", "web/deepseek-search-llm-request",
+        "workspace/changes", "subagent/catalog", "subagent/descriptor",
+        "subagent/model-selection-policy",
+        // The other half of a retry: the `llm/retry` line above it already said
+        // that an attempt failed and another is on its way.
+        "llm/retry-started",
         -> null
         "tool/call" -> EventPayload.toolCallOf(event)?.let { call ->
             TranscriptItem.ToolCall(
