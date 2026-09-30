@@ -2159,6 +2159,14 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
 
 
 internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): TranscriptItem? {
+    // The session-log upload acknowledges its own delivery with
+    // `session-log-deepseek/delivery-accepted` after *every* step, so falling
+    // through to the activity row below draws one raw type name under every
+    // message. Nothing in that namespace is conversation -- it is the transport
+    // reporting on itself -- so it is matched as a namespace rather than as the
+    // one name seen leaking, which is also how `docs/event-coverage.md` records
+    // it.
+    if (event.type.startsWith("session-log-deepseek/")) return null
     // `turn:<turn>:<seq>`: the turn is part of the key because the usage row
     // is placed under the last row of its turn, and the renderer draws a
     // stream of rows with no turn model of its own. A key of `seq-<n>` left
