@@ -380,6 +380,7 @@ private fun FilePreviewDialog(
     loading: String?,
     onDismiss: () -> Unit,
     onZoom: (FilePreview.Bitmap) -> Unit,
+    access: FileAccess = FileAccess(),
 ) {
     if (preview == null && loading == null) return
     // Held across the loading state: the path is known before the read answers,
@@ -396,7 +397,17 @@ private fun FilePreviewDialog(
                     fontSize = 15.sp,
                 )
                 Text(
-                    text = preview?.path ?: loading.orEmpty(),
+                    // The line range is part of what the reference said, and a
+                    // reader sent to line 240 of a long file needs to be told
+                    // that is where they were sent.
+                    text = buildString {
+                        append(preview?.path ?: loading.orEmpty())
+                        preview?.lines?.let { lines ->
+                            append(" · L")
+                            append(lines.first)
+                            if (lines.last != lines.first) append("-").append(lines.last)
+                        }
+                    },
                     color = MUTED,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
@@ -444,7 +455,9 @@ private fun FilePreviewDialog(
                         // than a wall of `##` and `**`. Everything else stays
                         // source, which is what a source file is for.
                         if (document != null) {
-                            MarkdownBody(document)
+                            // A link inside a document is relative to the
+                            // document, not to the session's working directory.
+                            MarkdownBody(document, access = access.atBase(directoryOf(viewPath)))
                         } else {
                             // Horizontal scroll belongs to the source view only:
                             // a document with a long line should wrap, and a
@@ -865,6 +878,7 @@ private fun DshApp(holder: AppStateHolder, context: Context) {
             loading = state.previewLoading,
             onDismiss = holder::dismissPreview,
             onZoom = { zoomed = it },
+            access = fileAccess(holder, state, context),
         )
     }
     zoomed?.let { ImageZoomViewer(it, onDismiss = { zoomed = null }) }
@@ -1303,7 +1317,12 @@ private fun ConnectionDialog(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationView(conversation: Conversation, state: AppState, holder: AppStateHolder) {
+    val context = LocalContext.current
     val listState = rememberLazyListState()
+    // What a reply's file references open *into*, in this session's terms: the
+    // working directory a relative destination was written against, the figures
+    // already read, and the two places a tap can land.
+    val access = fileAccess(holder, state, context)
     var input by remember { mutableStateOf("") }
     // Derived from the draft on every recomposition: the menu has to disappear
     // the moment the draft stops being a command line, and a remembered copy
@@ -1504,12 +1523,13 @@ private fun ConversationView(conversation: Conversation, state: AppState, holder
             items(conversation.items, key = { it.key }) { item ->
                 TranscriptRow(
                     item,
-                    onOpenFile = holder::previewFile,
+                    onOpenFile = holder::previewPath,
+                    access = access,
                     usageStats = state.metrics[conversation.sessionId]?.stats,
                 )
             }
             if (liveText.isNotEmpty()) {
-                item(key = "live") { AssistantBubble(liveText, streaming = true) }
+                item(key = "live") { AssistantBubble(liveText, streaming = true, access = access) }
             }
             conversation.error?.let { message ->
                 item {
@@ -2053,17 +2073,218 @@ private fun QuestionBody(interaction: PendingInteraction, holder: AppStateHolder
     }
 }
 
+/**
+ * How the text of a message reaches the files it refers to.
+ *
+ * A reply delivers its files by linking them, so opening one is part of reading
+ * the reply rather than a separate screen; this is the set of moves the renderer
+ * is allowed to make. [base] is the folder a relative destination resolves
+ * against -- the session's working directory for a message, the file's own
+ * folder inside a document preview -- and null leaves the choice to
+ * `previewFile`, which falls back to the session root.
+ *
+ * The default instance opens nothing, which is what a caller rendering text with
+ * no client behind it wants.
+ */
+internal class FileAccess(
+    val base: String? = null,
+    val figures: Map<String, FigureState> = emptyMap(),
+    val onLoadFigure: (String) -> Unit = {},
+    val onOpenReference: (String, String?) -> Unit = { _, _ -> },
+    val onOpenExternal: (String) -> Unit = {},
+) {
+    /** Open one destination, by what it turns out to name. */
+    fun openLink(destination: String) {
+        when (val target = linkTargetOf(destination)) {
+            is LinkTarget.File -> onOpenReference(destination, base)
+            is LinkTarget.External -> onOpenExternal(target.url)
+            LinkTarget.Inert -> Unit
+        }
+    }
+
+    /** The absolute path a destination resolves to, or null when it names no file. */
+    fun pathOf(destination: String): String? =
+        (linkTargetOf(destination) as? LinkTarget.File)?.let { resolveWorkspacePath(base, it.ref.path) }
+
+    /**
+     * The same moves, resolving relative references against another folder.
+     *
+     * What the preview sheet needs: a document's own links are relative to the
+     * document, and it is opened from a transcript whose base is the session's
+     * working directory.
+     */
+    fun atBase(base: String?) = FileAccess(base, figures, onLoadFigure, onOpenReference, onOpenExternal)
+}
+
+/**
+ * The moves a reply's file references may make, for the open conversation.
+ *
+ * The base is the session's working directory: the harness writes a delivered
+ * destination against it, and it is what the Host resolves a relative path
+ * against -- so resolving it here and resolving it there agree on which file a
+ * reference means.
+ */
+private fun fileAccess(holder: AppStateHolder, state: AppState, context: Context): FileAccess =
+    FileAccess(
+        base = state.conversation?.workspaceRoot,
+        figures = state.figures,
+        onLoadFigure = holder::loadFigure,
+        onOpenReference = holder::previewFile,
+        onOpenExternal = { openExternal(context, it) },
+    )
+
+/**
+ * Open an external URL in whatever the phone uses for one.
+ *
+ * A reply links the web as readily as it links a file, and this app has no
+ * browser of its own; `ACTION_VIEW` is the platform's answer. A phone with
+ * nothing registered for the scheme is answered with nothing rather than a
+ * crash, which is the right outcome for a link the reader cannot follow anyway.
+ */
+private fun openExternal(context: Context, url: String) {
+    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
+}
+
+/**
+ * A figure a reply delivered, drawn where it was written.
+ *
+ * The harness asks for a figure to be delivered as `![Description](<path>)`, and
+ * a name the reader has to tap before seeing anything is not that: the reply's
+ * figures are the reply. So the bytes are read as soon as the block is drawn and
+ * shown in place, scaled to the column.
+ *
+ * Tapping opens the preview sheet, the same destination every other file
+ * reference in the transcript has -- one gesture, one place, whether the file is
+ * this figure, a report beside it, or a path that turns out not to exist.
+ */
+@Composable
+private fun FigureBlock(block: MarkdownBlock.Image, access: FileAccess = FileAccess()) {
+    val path = access.pathOf(block.destination)
+    val name = path?.substringAfterLast('/') ?: block.destination
+    val caption = block.alt.ifBlank { name }
+    LaunchedEffect(path) {
+        if (path != null && access.figures[path] == null) access.onLoadFigure(path)
+    }
+    val state = path?.let { access.figures[it] }
+    val open = { access.openLink(block.destination) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        when {
+            state is FigureState.Ready && state.mime != null && state.bytes.size <= MAX_INLINE_FIGURE_BYTES -> {
+                val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path, state) {
+                    value = withContext(Dispatchers.IO) { decodeFigure(state.bytes) }
+                }
+                val image = bitmap
+                if (image == null) {
+                    FigureRow(caption, "The figure could not be decoded.", open)
+                } else {
+                    androidx.compose.foundation.Image(
+                        bitmap = image.asImageBitmap(),
+                        contentDescription = caption,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = open,
+                            ),
+                    )
+                }
+            }
+            state is FigureState.Ready && state.mime != null ->
+                FigureRow(caption, "%.1f MB — too large to draw here. Tap to open.".format(state.bytes.size / 1024.0 / 1024.0), open)
+            // Bytes that are not an image at all, a read that failed, and a reply
+            // still being read all end in the same place: the name, the reason,
+            // and the tap that opens it.
+            state is FigureState.Ready -> FigureRow(caption, "Not an image this build can draw.", open)
+            state is FigureState.Failed -> FigureRow(caption, state.reason, open)
+            state is FigureState.Loading -> FigureRow(caption, "reading…", open)
+            else -> FigureRow(caption, null, open)
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = open,
+                ),
+        ) {
+            Text(caption, color = MUTED, fontSize = 11.sp, lineHeight = 15.sp)
+            if (caption != name) {
+                Text(name, color = Color(0xFF6C7484), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
+}
+
+/** A figure this build will not draw: the name, why, and the tap that opens it. */
+@Composable
+private fun FigureRow(caption: String, note: String?, onOpen: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1C2230), RoundedCornerShape(8.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onOpen,
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text(caption, color = Color(0xFF9CC4FF), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        note?.let { Text(it, color = MUTED, fontSize = 11.sp, lineHeight = 15.sp) }
+    }
+}
+
+/**
+ * Decode a figure, downsampled to something a phone can hold.
+ *
+ * A delivered panel is often print resolution -- the figures in a physics report
+ * run 2000-4000 px wide -- and a handful of those at full size is more heap than
+ * the app has. The sample size is read from the header before any pixels are
+ * decoded, so the full-size bitmap never exists, and the cap is above the width
+ * a phone can zoom into before the pixels stop meaning anything.
+ */
+private fun decodeFigure(bytes: ByteArray, maxWidth: Int = 1400): android.graphics.Bitmap? {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= maxWidth) sample *= 2
+    return android.graphics.BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        android.graphics.BitmapFactory.Options().apply { inSampleSize = sample },
+    )
+}
+
+/**
+ * The size above which a delivered figure is left to the preview sheet.
+ *
+ * The same ceiling the sheet uses, for the same reason: a decode that cannot fit
+ * fails as an `OutOfMemoryError`, which takes the process with it, and a row that
+ * says how big the file is beats an app that disappears.
+ */
+private const val MAX_INLINE_FIGURE_BYTES = 12 * 1024 * 1024
+
 @Composable
 private fun TranscriptRow(
     item: TranscriptItem,
     onOpenFile: (String) -> Unit = {},
+    /** How the reply's own file references are opened, in the session's terms. */
+    access: FileAccess = FileAccess(),
     /** The open session's totals, for the dialog a usage row opens. */
     usageStats: SessionStats? = null,
 ) {
     when (item) {
         is TranscriptItem.User -> UserBubble(item.text)
         is TranscriptItem.Pending -> PendingBubble(item)
-        is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming)
+        is TranscriptItem.Assistant -> AssistantBubble(item.text, streaming = item.streaming, access = access)
         is TranscriptItem.ToolCall -> ToolCard(item)
         is TranscriptItem.Activity -> ActivityRow(item.label, item.detail)
         // Unfolded results are folded away by the reducer; this keeps the `when`
@@ -2083,6 +2304,7 @@ private fun TranscriptRow(
                 TurnUsageDialog(item.usage, usageStats, onDismiss = { showUsage = false })
             }
         }
+        // A `present`ed path is a path, not a link destination: it is read as one.
         is TranscriptItem.Deliverables -> DeliverablesCard(item, onOpenFile)
     }
 }
@@ -2095,7 +2317,11 @@ private fun TranscriptRow(
  * wants the hierarchy, not the source.
  */
 @Composable
-private fun ProseBlock(block: MarkdownBlock.Prose, streaming: Boolean = false) {
+private fun ProseBlock(
+    block: MarkdownBlock.Prose,
+    streaming: Boolean = false,
+    access: FileAccess = FileAccess(),
+) {
     val body = block.lines.joinToString("\n").trim('\n')
     if (body.isEmpty()) return
     // A formula is the one thing the Compose renderer cannot draw. KaTeX can, and
@@ -2122,7 +2348,7 @@ private fun ProseBlock(block: MarkdownBlock.Prose, streaming: Boolean = false) {
     val content: @Composable () -> Unit = {
         SelectionContainer {
             Text(
-                text = SimpleMarkdown.inline(body, ACCENT, Color(0xFF8FD6FF)),
+                text = SimpleMarkdown.inline(body, ACCENT, Color(0xFF8FD6FF), access::openLink),
                 fontSize = size,
                 lineHeight = lineHeight,
                 fontWeight = weight,
@@ -2199,7 +2425,7 @@ private val TABLE_STRIPE = Color(0xFF1B1F27)
  * are what make a dense result table scannable rather than a wall of numbers.
  */
 @Composable
-private fun TableBlock(table: MarkdownBlock.Table) {
+private fun TableBlock(table: MarkdownBlock.Table, access: FileAccess = FileAccess()) {
     val columns = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
     if (columns == 0) return
 
@@ -2238,6 +2464,7 @@ private fun TableBlock(table: MarkdownBlock.Table) {
                         width = cellWidth[index],
                         header = true,
                         last = index == columns - 1,
+                        access = access,
                     )
                 }
             }
@@ -2258,6 +2485,7 @@ private fun TableBlock(table: MarkdownBlock.Table) {
                             width = cellWidth[index],
                             header = false,
                             last = index == columns - 1,
+                            access = access,
                         )
                     }
                 }
@@ -2356,10 +2584,16 @@ internal fun isBreakableCjk(ch: Char): Boolean = when (Character.UnicodeBlock.of
  * not to a composable of its own.
  */
 @Composable
-private fun RowScope.TableCell(text: String, width: androidx.compose.ui.unit.Dp, header: Boolean, last: Boolean) {
+private fun RowScope.TableCell(
+    text: String,
+    width: androidx.compose.ui.unit.Dp,
+    header: Boolean,
+    last: Boolean,
+    access: FileAccess = FileAccess(),
+) {
     Row(Modifier.width(width).fillMaxHeight()) {
         Text(
-            text = SimpleMarkdown.inline(text, ACCENT, Color(0xFF8FD6FF)),
+            text = SimpleMarkdown.inline(text, ACCENT, Color(0xFF8FD6FF), access::openLink),
             color = if (header) ACCENT else Color(0xFFB9C1CE),
             fontSize = 12.sp,
             lineHeight = 16.sp,
@@ -2439,14 +2673,14 @@ private fun PendingBubble(item: TranscriptItem.Pending) {
 }
 
 @Composable
-private fun AssistantBubble(text: String, streaming: Boolean) {
+private fun AssistantBubble(text: String, streaming: Boolean, access: FileAccess = FileAccess()) {
     Surface(
         color = BUBBLE_ASSISTANT,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp)) {
-            MarkdownBody(text, streaming)
+            MarkdownBody(text, streaming, access)
             if (streaming) {
                 Text("▍", color = ACCENT, fontSize = 14.sp)
             }
@@ -2461,15 +2695,26 @@ private fun AssistantBubble(text: String, streaming: Boolean) {
  * path draw a Markdown file with the same code. They are the same bytes and the
  * same syntax; two renderers would be two chances to disagree, and the one the
  * reader sees less often would be the one that rots.
+ *
+ * [access] carries the one thing the two paths do *not* share: what a relative
+ * file reference is relative to. In a message that is the session's working
+ * directory -- which is what the harness writes the destination against -- and
+ * in a previewed document it is that document's own folder, the way a Markdown
+ * file on disk means it.
  */
 @Composable
-private fun MarkdownBody(text: String, streaming: Boolean = false) {
+private fun MarkdownBody(
+    text: String,
+    streaming: Boolean = false,
+    access: FileAccess = FileAccess(),
+) {
     val blocks = remember(text) { SimpleMarkdown.parse(text) }
     blocks.forEach { block ->
         when (block) {
-            is MarkdownBlock.Prose -> ProseBlock(block, streaming)
+            is MarkdownBlock.Prose -> ProseBlock(block, streaming, access)
             is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
-            is MarkdownBlock.Table -> TableBlock(block)
+            is MarkdownBlock.Table -> TableBlock(block, access)
+            is MarkdownBlock.Image -> FigureBlock(block, access)
             MarkdownBlock.Rule -> HorizontalDivider(
                 Modifier.padding(vertical = 6.dp),
                 color = Color(0xFF2A2F38),

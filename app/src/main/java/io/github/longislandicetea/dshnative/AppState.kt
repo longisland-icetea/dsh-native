@@ -189,6 +189,17 @@ private const val SLOW_REQUEST_MS = 3_000L
  */
 private const val PENDING_AFTER_REPLAY_MS = 2_000L
 
+/**
+ * How many delivered figures the transcript keeps in memory.
+ *
+ * A figure is read whole to be drawn, and a session that delivers a gallery can
+ * deliver a dozen of them; keeping every one would grow the app's heap with the
+ * length of a conversation. Twelve is more figures than fit on a phone screen at
+ * once, and an evicted one costs a re-read through the preview sheet rather than
+ * anything the reader loses.
+ */
+private const val MAX_FIGURES = 12
+
 internal fun <T> Flow<T>.resubscribe(
     delayMillis: Long,
     onEnd: (Throwable?) -> Unit = {},
@@ -447,6 +458,17 @@ sealed interface FilePreview {
     val path: String
 
     /**
+     * The lines the reference pointed at (`report.md#L24-L30`), when it named
+     * any.
+     *
+     * Shown, not scrolled to: the sheet previews text the Host pages, and a
+     * scroll offset computed from an assumed line height would land somewhere
+     * plausible and wrong. Saying which lines were meant is the honest half of
+     * the anchor.
+     */
+    val lines: IntRange?
+
+    /**
      * UTF-8 text. A Markdown document is laid out the way a transcript message
      * is; anything else is shown as the source it is.
      *
@@ -458,6 +480,7 @@ sealed interface FilePreview {
         override val path: String,
         val body: String,
         val truncated: Boolean = false,
+        override val lines: IntRange? = null,
     ) : FilePreview
 
     /**
@@ -472,13 +495,41 @@ sealed interface FilePreview {
         val bytes: ByteArray,
         val mime: String?,
         val totalBytes: Long?,
+        override val lines: IntRange? = null,
     ) : FilePreview {
         override fun equals(other: Any?) = this === other
         override fun hashCode() = System.identityHashCode(this)
     }
 
     /** The read failed; [reason] is written for a reader, not a developer. */
-    data class Failed(override val path: String, val reason: String) : FilePreview
+    data class Failed(
+        override val path: String,
+        val reason: String,
+        override val lines: IntRange? = null,
+    ) : FilePreview
+}
+
+/**
+ * A figure a reply referred to, as far as this client has got with it.
+ *
+ * Kept apart from [FilePreview] because it answers a different question: the
+ * sheet is open or it is not, while a figure is drawn *in* the transcript, so
+ * several are in flight at once and each has to say what it is doing on its own.
+ */
+sealed interface FigureState {
+    data object Loading : FigureState
+
+    /**
+     * The file's bytes, with the image type when they are one this build can
+     * draw. A null [mime] is a real answer -- the reference named something that
+     * is not an image -- and the row falls back to a tappable name.
+     */
+    data class Ready(val bytes: ByteArray, val mime: String?) : FigureState {
+        override fun equals(other: Any?) = this === other
+        override fun hashCode() = System.identityHashCode(this)
+    }
+
+    data class Failed(val reason: String) : FigureState
 }
 
 data class Conversation(
@@ -728,6 +779,15 @@ data class AppState(
     val preview: FilePreview? = null,
     /** Path whose read is in flight, so the sheet can show that rather than a blank. */
     val previewLoading: String? = null,
+    /**
+     * Figures a reply delivered, by the absolute path they resolved to.
+     *
+     * The transcript draws them where they were written, so this is what makes
+     * a reply's figures visible without opening anything -- and the key is the
+     * resolved path because the same figure referenced from two places is one
+     * read.
+     */
+    val figures: Map<String, FigureState> = emptyMap(),
 ) {
     /**
      * Sessions the drawer actually shows.
@@ -1891,6 +1951,10 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
                 // fold's memory is not carried across.
                 fold = null,
                 selection = selection,
+                // Figures are keyed by path and belong to the transcript that
+                // referenced them: another session's are not drawn, so holding
+                // them would be memory spent on nothing.
+                figures = emptyMap(),
             )
         }
         openFollow(session.sessionId, session.title)
@@ -1900,27 +1964,105 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     }
 
     /**
-     * Read a deliverable back for the preview sheet.
+     * Open one file reference in the preview sheet.
      *
-     * The read is host-side over `workspaceFiles/read` because that is the only
-     * path that can see a file the harness wrote outside the app sandbox. A
-     * relative path is resolved against the session's workspace root, which is
-     * what the Host does with it.
+     * The argument is what the reply wrote -- `out/report.md#L24`, `<fig (1).png>`,
+     * an absolute path -- because that is what the transcript holds. The harness
+     * tells the model to
+     * deliver a file by linking it, with the destination relative to the working
+     * directory or absolute, so both spellings arrive here and the resolution is
+     * the Host's own rule ([resolveWorkspacePath]).
+     *
+     * The read itself is host-side over `workspaceFiles/read`, the only path that
+     * can see a file the harness wrote outside the app sandbox.
+     *
+     * [base] is the folder a relative destination is resolved against, for a
+     * caller that is not the transcript -- a document's own links are relative to
+     * the document. Null means the session's working directory, which is what a
+     * message's references are relative to.
      */
-    fun previewFile(path: String) {
-        val active = client
+    fun previewFile(reference: String, base: String? = null) {
+        val ref = (linkTargetOf(reference) as? LinkTarget.File)?.ref
+        if (ref == null) {
+            // A destination that names no file -- a fragment, a foreign scheme --
+            // is not a read that failed, but a tap that had nothing behind it.
+            _state.update {
+                it.copy(
+                    preview = FilePreview.Failed(
+                        unwrapDestination(reference),
+                        "This link does not name a file on the host, so there is nothing to open.",
+                    ),
+                )
+            }
+            return
+        }
+        openPreview(ref, base)
+    }
+
+    /**
+     * Open a path the Host itself named -- a file a `present` call declared.
+     *
+     * A declared path is not a link destination and must not be read as one: a
+     * link destination carries syntax (`<...>`, `#L24`, `?query`) that has to be
+     * taken apart, while a path is already a path, and one that happens to be
+     * spelled like a scheme (`notes:24.md` is a legal file name) or to hold a `#`
+     * would be mangled by that reading. The distinction is the web client's: it
+     * classifies Markdown destinations, and hands a presented path straight to
+     * the file address.
+     */
+    fun previewPath(path: String) = openPreview(FileRef(path), base = null)
+
+    private fun openPreview(ref: FileRef, base: String?) {
         val session = _state.value.conversation
-        val root = session?.workspaceRoot?.trimEnd('/')
-        val resolved = if (path.startsWith("/") || root == null) path else "$root/$path"
+        val resolved = resolveWorkspacePath(base ?: session?.workspaceRoot, ref.path)
+        val active = client
         if (active == null || session == null) {
-            _state.update { it.copy(preview = FilePreview.Failed(resolved, "Not connected.")) }
+            _state.update { it.copy(preview = FilePreview.Failed(resolved, "Not connected.", ref.lines)) }
             return
         }
         _state.update { it.copy(previewLoading = resolved) }
         scope.launch(Dispatchers.IO) {
-            val preview = readPreview(active, session.sessionId, resolved)
+            val preview = readPreview(active, session.sessionId, resolved, ref.lines)
             _state.update { it.copy(preview = preview, previewLoading = null) }
         }
+    }
+
+    /**
+     * Load a figure a reply drew, so the transcript can show it where it was
+     * written.
+     *
+     * [path] is already resolved (the transcript knows the base the reference was
+     * written against). The bytes are read once per path and kept, because a
+     * transcript redraws constantly and a figure is the largest thing in it; the
+     * cache is bounded by [MAX_FIGURES] so an ordinary session cannot grow it
+     * without limit.
+     */
+    fun loadFigure(path: String) {
+        val active = client ?: return
+        val session = _state.value.conversation ?: return
+        if (_state.value.figures.containsKey(path)) return
+        _state.update { it.copy(figures = boundedFigures(it.figures + (path to FigureState.Loading))) }
+        scope.launch(Dispatchers.IO) {
+            val state = runCatching { active.readWorkspaceBytes(session.sessionId, path) }.fold(
+                onSuccess = { bytes -> FigureState.Ready(bytes, imageMimeOf(bytes)) },
+                onFailure = { error -> FigureState.Failed(explainReadFailure(error.message.orEmpty())) },
+            )
+            _state.update { it.copy(figures = boundedFigures(it.figures + (path to state))) }
+        }
+    }
+
+    /**
+     * Keep the figure cache to its newest [MAX_FIGURES] entries.
+     *
+     * Insertion order, not use order: the transcript draws what it holds in the
+     * order it holds it, so the oldest read is the one furthest up the
+     * conversation and the least likely to be looked at again. An evicted figure
+     * is not lost -- the row falls back to the file's name, and the tap that
+     * opens it still reads it through the sheet.
+     */
+    private fun boundedFigures(figures: Map<String, FigureState>): Map<String, FigureState> {
+        if (figures.size <= MAX_FIGURES) return figures
+        return figures.entries.drop(figures.size - MAX_FIGURES).associate { it.key to it.value }
     }
 
     /**
@@ -1930,19 +2072,24 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
      * refuses, the bytes endpoint answers the question the reader actually asked,
      * which for a figure is "show me the picture".
      */
-    private suspend fun readPreview(active: DshClient, sessionId: String, path: String): FilePreview {
+    private suspend fun readPreview(
+        active: DshClient,
+        sessionId: String,
+        path: String,
+        lines: IntRange? = null,
+    ): FilePreview {
         val asText = runCatching { active.readWorkspaceFile(sessionId, path) }
         asText.getOrNull()?.let {
-            return FilePreview.Text(path, it.text, truncated = it.truncated)
+            return FilePreview.Text(path, it.text, truncated = it.truncated, lines = lines)
         }
         val textFailure = asText.exceptionOrNull()?.message.orEmpty()
         if (!textFailure.contains("not-text")) {
-            return FilePreview.Failed(path, explainReadFailure(textFailure))
+            return FilePreview.Failed(path, explainReadFailure(textFailure), lines)
         }
         val asBytes = runCatching { active.readWorkspaceBytes(sessionId, path) }
         val bytes = asBytes.getOrNull()
-            ?: return FilePreview.Failed(path, explainReadFailure(asBytes.exceptionOrNull()?.message.orEmpty()))
-        return FilePreview.Bitmap(path, bytes, imageMimeOf(bytes), bytes.size.toLong())
+            ?: return FilePreview.Failed(path, explainReadFailure(asBytes.exceptionOrNull()?.message.orEmpty()), lines)
+        return FilePreview.Bitmap(path, bytes, imageMimeOf(bytes), bytes.size.toLong(), lines)
     }
 
     /**
@@ -1975,6 +2122,11 @@ class AppStateHolder(private val scope: CoroutineScope, context: android.content
     private fun explainReadFailure(message: String): String = when {
         message.contains("not-text") ->
             "This file is neither text nor an image this build can draw, so there is nothing to show here."
+        // A reply links a folder as readily as a file -- `[figures](<out/figures/>)`
+        // is how a turn points at where the figures went -- and a folder is not a
+        // missing file: the difference is the whole answer the reader needs.
+        message.contains("not-regular-file") ->
+            "This path is a folder, not a file. Open a file inside it from the host at the path above."
         message.contains("not-found") ->
             "The Host cannot find this path. It may have been moved or deleted since the turn that produced it."
         // The read is capped at the deployment's page size, and the cap is a

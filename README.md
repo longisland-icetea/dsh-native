@@ -55,10 +55,13 @@ trust.
   quotes, links, fenced code with syntax highlighting), tool calls as cards that
   fold in their results, background-job notices as cards, and a follow-the-newest
   behaviour that only follows while you are at the bottom.
-- **The plan and the output**: `todo/write` renders as a checklist, and files a turn
-  presents open in a preview — a Markdown deliverable laid out as a document the
-  way a transcript message is, anything else as selectable source, and images full
-  screen with pinch-to-zoom.
+- **The plan and the output**: `todo/write` renders as a checklist, and the files a
+  turn delivers open in a preview — a Markdown deliverable laid out as a document
+  the way a transcript message is, anything else as selectable source, and images
+  full screen with pinch-to-zoom. A delivery is read from both places the harness
+  offers: a reply's own references (`![fig](<out/fig1.png>)` is drawn in place,
+  `[report](<out/report.md#L24-L30>)` opens on a tap, and the referenced lines are
+  named in the sheet) and a `present` call's cards.
 - **Control**: send prompts, cancel a running turn, switch model and reasoning
   effort, run `/compact`, answer approvals and questions the Host asks, and create
   sessions either in a chosen workspace or in the default directory.
@@ -164,6 +167,15 @@ Seven things about this harness are easy to get wrong, and each cost a bug here:
   it — an argument the descriptor does not declare is a refusal, not something
   ignored. `workspaceFiles/readBytes`'s byte window was `range` in 0.1.5 and is
   `options` in 0.1.7, which is what broke image preview on the phone.
+- **A delivery is text in the reply, not a card.** The harness tells the model to
+  hand over a file by *linking* it — `![Description](<path/to/figure.png>)`,
+  `[Description](<path/to/file.md>)`, the destination relative to the session's
+  working directory or absolute, `#L24` / `#L24-L30` for a few lines — and
+  `present` only when a separate card adds something. A client that renders links
+  as dead text therefore shows a turn that delivered nothing: figures arrive as
+  literal `![fig1](out/fig1.png)`, and the path is the only thing on screen. Both
+  spellings resolve the same way here, images included, through
+  `workspaceFiles/read` and `workspaceFiles/readBytes`.
 - **Bytes do not travel inside the JSON.** A result field holding binary comes back
   as a part of a `multipart/form-data` response: the value keeps the field with
   `null` in it, and an `attachments` entry beside the result says which part fills

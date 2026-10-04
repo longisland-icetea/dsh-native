@@ -17,11 +17,11 @@ Column meanings:
 | type | render | why |
 |---|---|---|
 | `user/message` | bubble when `source.kind == "user"`, otherwise a notice card (or hidden) | the harness talks about its own work; a job result is machinery, not a person |
-| `assistant/message` | markdown bubble | the reply itself |
+| `assistant/message` | markdown bubble, with the reply's own file references openable (figures drawn in place) | the reply itself — and, since the harness asks for a delivery as a Markdown link or image, the delivery surface too |
 | `tool/call` | tool card with arguments | the one line that makes a tool-heavy turn scannable |
 | `tool/result` | folded into its call | a separate row doubles every tool's height |
 | `todo/write` | todo card | the plan is the most useful thing to re-read mid-turn |
-| `deliverables/presented` | deliverables card, each row opening a preview | the whole point of a turn is what it produced |
+| `deliverables/presented` | deliverables card, each row opening a preview | the whole point of a turn is what it produced; `present` is now the *secondary* delivery surface — a reply's own `![…](<path>)` / `[…](<path>)` references are the primary one, and both open the same sheet |
 | `model/selection` | model chip | answers "which model is this" without opening settings |
 | `agent-preset/selected` | one note: `agent preset: <name>` | the preset decides the tools, skills and instructions a session runs with, which is why two sessions behave differently on one Host; nothing else on screen says which one this is |
 | `goal/change` | one note: what the goal just did, with its objective truncated | the goal lives outside the conversation and this client has no goal bar (see `web-parity.md`), so this line is the only surface a reader can watch it on |

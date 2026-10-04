@@ -18,6 +18,7 @@ class SimpleMarkdownTest {
             is MarkdownBlock.Prose -> it.kind
             is MarkdownBlock.Code -> null
             is MarkdownBlock.Table -> null
+            is MarkdownBlock.Image -> null
             MarkdownBlock.Rule -> null
         }
     }
@@ -160,6 +161,134 @@ class SimpleMarkdownTest {
         // must not swallow it.
         val text = SimpleMarkdown.inline("见 https://example.com/x。", ACCENT_TEST, CODE_TEST).text
         assertEquals("见 https://example.com/x。", text)
+    }
+
+    // ── delivered files ───────────────────────────────────────────────────────
+
+    /**
+     * The shape the harness asks for and the reply below actually used: a
+     * figure alone on its line, then the documents as links in a bullet list.
+     */
+    private val DELIVERY = """
+        图集做好了。
+
+        ## 五张图
+
+        **fig1 电子结构** — 能带 K–Γ–M
+
+        ![fig1](analysis_out/figures/fig1_electronic_structure.png)
+
+        读法：带 9 在 Γ 处低于 E_F。
+
+        ![fig2](<analysis_out/figures/fig2 phonon dispersion.png>)
+
+        ## 交付物
+
+        - 图片：[analysis_out/figures/](analysis_out/figures/) — 5 张 PNG
+        - 分析文档：[AAp_FIGURES_ANALYSIS.md](AAp_FIGURES_ANALYSIS.md) — 逐图读法
+        - 脚本：[make_figures.py](scripts/elias_py/make_figures.py#L12-L40)
+    """.trimIndent()
+
+    @Test
+    fun `a figure alone on its line is a block, and carries its path unwrapped`() {
+        val figures = SimpleMarkdown.parse(DELIVERY).filterIsInstance<MarkdownBlock.Image>()
+        assertEquals(2, figures.size)
+        assertEquals("fig1", figures[0].alt)
+        assertEquals("analysis_out/figures/fig1_electronic_structure.png", figures[0].destination)
+        // Bracketed, because the path holds a space.
+        assertEquals("fig2", figures[1].alt)
+        assertEquals("analysis_out/figures/fig2 phonon dispersion.png", figures[1].destination)
+    }
+
+    @Test
+    fun `the prose around a figure is not eaten by it`() {
+        val blocks = SimpleMarkdown.parse(DELIVERY)
+        val prose = blocks.filterIsInstance<MarkdownBlock.Prose>().map { it.lines.joinToString(" ") }
+        assertTrue(prose.any { it.contains("能带 K–Γ–M") })
+        assertTrue(prose.any { it.contains("读法") })
+        assertTrue(prose.any { it.contains("交付物") })
+    }
+
+    @Test
+    fun `a bulleted image is not a figure block`() {
+        // A picture sharing its line with words has no layout here; it stays the
+        // bullet it was written as, and its reference is still openable.
+        val blocks = SimpleMarkdown.parse("- ![fig1](out/fig1.png) 见图")
+        assertEquals(1, blocks.size)
+        assertEquals(ProseKind.Bullet, (blocks[0] as MarkdownBlock.Prose).kind)
+    }
+
+    @Test
+    fun `trailing spaces after a figure are not part of its path`() {
+        val figure = SimpleMarkdown.parse("![fig1](out/fig1.png)   ").filterIsInstance<MarkdownBlock.Image>().single()
+        assertEquals("out/fig1.png", figure.destination)
+    }
+
+    @Test
+    fun `an image with no destination stays prose`() {
+        val blocks = SimpleMarkdown.parse("![]()")
+        assertTrue(blocks.single() is MarkdownBlock.Prose)
+    }
+
+    @Test
+    fun `an image reference never prints its bang`() {
+        // `![fig1](x.png)` inside a sentence is drawn as its reference, and a
+        // reader shown `!fig1 (x.png)` reads a broken line where it is a good one.
+        val text = SimpleMarkdown.inline("见 ![fig1](out/fig1.png) 所示", ACCENT_TEST, CODE_TEST).text
+        assertEquals("见 fig1 (out/fig1.png) 所示", text)
+    }
+
+    @Test
+    fun `a file link is annotated so a tap can open it`() {
+        val opened = mutableListOf<String>()
+        val text = SimpleMarkdown.inline(
+            "见 [AAp_FINAL_RESULT.md](AAp_FINAL_RESULT.md)",
+            ACCENT_TEST,
+            CODE_TEST,
+            onOpenLink = { opened += it },
+        )
+        assertEquals("见 AAp_FINAL_RESULT.md (AAp_FINAL_RESULT.md)", text.text)
+        val links = text.getLinkAnnotations(0, text.length)
+        assertEquals(1, links.size)
+        // The destination the handler is given is what the reply wrote, anchor
+        // and all: resolving it is the caller's business.
+        val listener = (links.single().item as androidx.compose.ui.text.LinkAnnotation.Url).linkInteractionListener
+        listener!!.onClick(links.single().item)
+        assertEquals(listOf("AAp_FINAL_RESULT.md"), opened)
+    }
+
+    @Test
+    fun `a link whose destination is nothing is not tappable`() {
+        // A fragment or an empty destination would open a read that cannot
+        // succeed; a coloured word that does nothing is the honest drawing.
+        val text = SimpleMarkdown.inline("见 [这里](#L24)", ACCENT_TEST, CODE_TEST, onOpenLink = { })
+        assertEquals(0, text.getLinkAnnotations(0, text.length).size)
+    }
+
+    @Test
+    fun `with no handler every link is inert`() {
+        val text = SimpleMarkdown.inline("[report](out/report.md)", ACCENT_TEST, CODE_TEST)
+        assertEquals(0, text.getLinkAnnotations(0, text.length).size)
+        assertEquals("report (out/report.md)", text.text)
+    }
+
+    @Test
+    fun `a bracketed destination may hold parentheses and spaces`() {
+        val line = "![a](<figures/fig (1).png>)"
+        val reference = SimpleMarkdown.referenceAt(line, 0)
+        // The destination is returned as written, brackets included: unwrapping
+        // them is `inline`'s job, because that is where the path is classified.
+        assertEquals("<figures/fig (1).png>", reference!!.destination)
+        assertEquals(line.length, reference.end)
+    }
+
+    @Test
+    fun `a figure inside a previewed document is a block too`() {
+        // The document path parses with the same code, and a report's own
+        // `![](figures/x.png)` is exactly this shape.
+        val blocks = SimpleMarkdown.parse("| a | b |\n|---|---|\n| 1 | 2 |\n\n![](figures/fig3.png)\n")
+        assertTrue(blocks.any { it is MarkdownBlock.Table })
+        assertEquals("figures/fig3.png", blocks.filterIsInstance<MarkdownBlock.Image>().single().destination)
     }
 
     private companion object {

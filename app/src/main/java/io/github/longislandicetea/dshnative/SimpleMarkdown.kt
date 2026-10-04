@@ -2,12 +2,16 @@ package io.github.longislandicetea.dshnative
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 
 /**
@@ -29,6 +33,17 @@ sealed interface MarkdownBlock {
 
     /** A pipe table; the first row is the header. */
     data class Table(val header: List<String>, val rows: List<List<String>>) : MarkdownBlock
+
+    /**
+     * A delivered figure, alone on its line: `![alt](<path/to/figure.png>)`.
+     *
+     * A block rather than inline text because that is how the harness asks for a
+     * figure to be delivered, and because a figure is the one thing in a reply
+     * that is not readable as words. [destination] is the path as written --
+     * still relative, still bracketed-free -- since resolving it needs to know
+     * what it is relative to, and the parser does not.
+     */
+    data class Image(val alt: String, val destination: String) : MarkdownBlock
 
     /** A horizontal rule. */
     data object Rule : MarkdownBlock
@@ -52,6 +67,15 @@ object SimpleMarkdown {
     private val HEADING = Regex("^(#{1,6})\\s+(.*)$")
     private val TABLE_DIVIDER = Regex("^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)*\\|?\\s*$")
     private val FENCE = Regex("^\\s*(```|~~~)")
+
+    /**
+     * One image reference and nothing else, which is what makes it a figure.
+     *
+     * The destination is everything to the last bracket on the line, so a
+     * bracketed path may hold the spaces and parentheses the harness warns about
+     * (`<figures/fig (1).png>`) instead of being cut at the first `)`.
+     */
+    private val IMAGE = Regex("^!\\[([^\\]]*)\\]\\((.+)\\)$")
 
     fun parse(text: String): List<MarkdownBlock> {
         val blocks = mutableListOf<MarkdownBlock>()
@@ -105,6 +129,20 @@ object SimpleMarkdown {
                 RULE.matches(line) -> {
                     flush()
                     blocks += MarkdownBlock.Rule
+                    index++
+                }
+                // A figure stands where it is written. An image that shares a
+                // line with words is not one of these: it stays in the prose and
+                // is drawn as its own reference, because a paragraph and a
+                // full-width picture interleaving is a layout this renderer does
+                // not attempt (see `inline`).
+                IMAGE.matchEntire(line.trim())?.takeIf { it.groupValues[2].isNotBlank() } != null -> {
+                    flush()
+                    val match = IMAGE.matchEntire(line.trim())!!
+                    blocks += MarkdownBlock.Image(
+                        alt = match.groupValues[1].trim(),
+                        destination = unwrapDestination(match.groupValues[2]),
+                    )
                     index++
                 }
                 HEADING.matches(line) -> {
@@ -238,14 +276,27 @@ object SimpleMarkdown {
      * Inline spans: `code`, **bold**, *italic*, ~~strike~~, [text](url), and
      * bare URLs.
      *
-     * Audio is not emitted and images are not laid out, so a link keeps its text
-     * and prints its target after it: a phone cannot hover, and the URL is often
-     * the thing the model wants read.
+     * A link keeps its text and prints its destination after it: a phone cannot
+     * hover, and the path is often the thing the model wants read. It is also
+     * *tappable* now -- that is how a reply delivers a file (`[Report](<out/report.md>)`,
+     * `![figure](<out/fig1.png>)`), and a delivery the reader cannot open is not
+     * a delivery.
+     *
+     * [onOpenLink] receives the destination *as written*, not a resolved path:
+     * what it is relative to is a fact about the surface the text is drawn on --
+     * the session's workspace for a message, the file's own folder for a
+     * previewed document -- and this function has neither. When it is null every
+     * link stays inert, which is what a caller with nowhere to open one wants.
+     *
+     * An image that shares its line with prose is not laid out (there is no
+     * layout here for a picture between two words). It is drawn as its own
+     * reference instead, and it is still openable.
      */
     fun inline(
         line: String,
         accent: Color,
         codeColor: Color,
+        onOpenLink: ((String) -> Unit)? = null,
     ): AnnotatedString = buildAnnotatedString {
         var index = 0
         while (index < line.length) {
@@ -278,24 +329,38 @@ object SimpleMarkdown {
                         index = end + 1
                     }
                 }
-                line[index] == '[' -> {
-                    val labelEnd = line.indexOf(']', index + 1)
-                    val urlStart = if (labelEnd >= 0 && labelEnd + 1 < line.length && line[labelEnd + 1] == '(') labelEnd + 2 else -1
-                    val urlEnd = if (urlStart >= 0) line.indexOf(')', urlStart) else -1
-                    if (urlStart < 0 || urlEnd < 0) {
+                line[index] == '[' || (line[index] == '!' && line.getOrNull(index + 1) == '[') -> {
+                    val link = referenceAt(line, index)
+                    if (link == null) {
                         append(line[index]); index++
                     } else {
-                        val label = line.substring(index + 1, labelEnd)
-                        val url = line.substring(urlStart, urlEnd)
-                        // A link is styled, not clickable: opening one needs a
-                        // UriHandler, and the label plus its target is what the
-                        // reader acts on. Printing the target also survives being
-                        // copied out of the transcript.
-                        withStyle(SpanStyle(color = accent, textDecoration = TextDecoration.Underline)) {
-                            append(label)
+                        val destination = unwrapDestination(link.destination)
+                        val target = linkTargetOf(destination)
+                        val open = onOpenLink?.takeIf { target !is LinkTarget.Inert }
+                        if (open == null) {
+                            withStyle(SpanStyle(color = accent, textDecoration = TextDecoration.Underline)) {
+                                append(link.label)
+                            }
+                        } else {
+                            withLink(
+                                LinkAnnotation.Url(
+                                    // Only a payload for the listener below; a
+                                    // file destination gets a scheme of its own
+                                    // so that a tap which somehow missed the
+                                    // listener opens nothing rather than a URL.
+                                    url = if (target is LinkTarget.External) target.url else FILE_LINK_SCHEME + destination,
+                                    styles = TextLinkStyles(
+                                        style = SpanStyle(color = accent, textDecoration = TextDecoration.Underline),
+                                    ),
+                                    linkInteractionListener = LinkInteractionListener { onOpenLink(destination) },
+                                ),
+                            ) { append(link.label) }
                         }
-                        withStyle(SpanStyle(color = MUTED_LINK)) { append(" ($url)") }
-                        index = urlEnd + 1
+                        // The `!` is syntax and is not printed: a reader shown
+                        // `!fig1 (out/fig1.png)` reads a broken reference where
+                        // the line is a perfectly good one.
+                        withStyle(SpanStyle(color = MUTED_LINK)) { append(" ($destination)") }
+                        index = link.end
                     }
                 }
                 isBareUrlStart(line, index) -> {
@@ -329,6 +394,34 @@ object SimpleMarkdown {
                 }
             }
         }
+    }
+
+    /** One `[label](destination)` found in a line, and where it ends. */
+    internal class Reference(val label: String, val destination: String, val end: Int)
+
+    /**
+     * The reference starting at [index], which points at `[` or at the `!` of
+     * `![`.
+     *
+     * A bracketed destination ends at its `>` rather than at the first `)`, so a
+     * path the harness told the model to bracket for its spaces or parentheses
+     * (`<figures/fig (1).png>`) survives being read back. An unbracketed one
+     * ends at the first `)`, which is all Markdown allows it to contain.
+     */
+    internal fun referenceAt(line: String, index: Int): Reference? {
+        val open = if (line.getOrNull(index) == '!') index + 1 else index
+        if (line.getOrNull(open) != '[') return null
+        val labelEnd = line.indexOf(']', open + 1)
+        if (labelEnd < 0 || line.getOrNull(labelEnd + 1) != '(') return null
+        val start = labelEnd + 2
+        val close = if (line.getOrNull(start) == '<') {
+            val bracket = line.indexOf('>', start + 1)
+            if (bracket < 0 || line.getOrNull(bracket + 1) != ')') -1 else bracket + 1
+        } else {
+            line.indexOf(')', start)
+        }
+        if (close < 0) return null
+        return Reference(line.substring(open + 1, labelEnd), line.substring(start, close), close + 1)
     }
 
     private val MUTED_LINK = Color(0xFF6C7484)

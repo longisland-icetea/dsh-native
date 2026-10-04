@@ -34,6 +34,15 @@ Checked, and not gaps:
   same renderer a transcript message uses, anything else as source, and a page
   the Host cut short says so; image zoom, jump-to-newest, Load older, transport
   log, new-session button, reconnect and resubscribe.
+- A reply's own file references, which is now the harness's primary delivery
+  surface: `![Description](<path>)` is drawn in place (read through
+  `workspaceFiles/readBytes`, decoded downsampled), `[Description](<path>)` and
+  inline file links open the preview sheet, a `#L24-L30` anchor is named in the
+  sheet's title, and a relative destination resolves against the session's
+  working directory in a message and against its own folder inside a previewed
+  document — the two rules the web client's `resolveWorkspacePath` and
+  `markdownImageUrl` state. An `http(s)` link goes to the browser; a fragment or
+  a foreign scheme opens nothing.
 - Token usage, context pressure with its breakdown, the pending-message queue
   with steer/edit/remove, and the `/` command menu built from `commands/list`.
 - A sent message is on screen before the Host has read it, the way the web's
@@ -133,6 +142,14 @@ is a scroll; search is the feature that makes the list usable again.
   plan is Markdown and "Chat about it" cancels and returns to the composer. The
   app's `QuestionItem` does not model `intent` at all, so it can both miss a real
   plan review and claim one that is not.
+- **Inline-code file mentions.** The web resolves a `` `path/to/file.md` `` code
+  span against the turn's produced and delivered paths and makes it openable
+  (`chatFileMentions`, with a basename match when the token is not a full path).
+  The app opens the *links* a reply writes — which is what the harness's own
+  instructions ask for — but a bare code span naming a file is not a reference it
+  recognises. The turn's produced paths (from `write`/`edit` calls) are not
+  tracked either, so there is no card for a turn that wrote files without calling
+  `present`.
 - **Question card chrome.** The web can collapse/expand the card and dismiss the
   whole request ("Dismiss all questions", which rejects the waterfall). The app
   has neither; the card can only be answered or skipped question by question. The

@@ -1146,3 +1146,68 @@ own drawer still has no unarchive button, and a reader who opens an archived
 session and types will see their message admitted and then nothing happen; that is
 a UI guard for another change, recorded here because the Host's rule is what makes
 it necessary rather than a mystery.
+
+## Open the files a reply delivers by linking them
+
+The harness changed how a turn delivers its files, and this app was on the wrong
+side of the change.
+
+What it asks the model for now is in the system prompt: use
+`![Description](<path/to/image.png>)` for a figure, `[Description](<path/to/file>)`
+for a file, the destination "relative to the working directory or absolute",
+`#L24` / `#L24-L30` when the point is a few lines, and `present` only "when a
+separate file card helps the user open the complete deliverable". So a delivery
+arrives as *text inside the reply*, and the Web client draws it: figures load
+through `api/file?path=…` resolved against the session's `cwd`, links open the
+document preview, and a line anchor is carried.
+
+This client knew one delivery surface, `deliverables/presented`, so a turn that
+delivered by linking produced nothing to open. Measured on a real session
+(`ips-SC`, turn 10: five figures plus two reports and a script, no `present`
+call at all): every one of those files was readable through the Host and none was
+reachable from the phone. The message drew as `![fig1](analysis_out/…)` in prose
+and a link that was styled, not tappable -- the old comment said as much
+("A link is styled, not clickable: opening one needs a UriHandler").
+
+So the fix is in three parts, each where the mistake was:
+
+- **`FileReference.kt`** turns a destination back into something the Host can be
+  asked for -- `unwrapDestination`, `percentDecoded`, `lineRangeOf`,
+  `linkTargetOf`, and the Host's own resolution rule (`resolveWorkspacePath`).
+  It is pure and it is where the policy lives: `http(s)` belongs to the browser,
+  a fragment or a foreign scheme belongs to nobody, and everything else is a path
+  relative to a base the *caller* supplies.
+- **`SimpleMarkdown`** emits a `MarkdownBlock.Image` for a figure that stands
+  alone on its line, and annotates every link whose destination is openable with
+  a `LinkAnnotation.Url` whose listener carries the destination *as written*.
+  A figure that shares a line with prose is not laid out -- there is no layout
+  here for a picture between two words -- but it is drawn as its own reference
+  and it is openable; the `!` is never printed.
+- **The transcript** reads a figure's bytes as soon as the block is drawn
+  (`loadFigure`, bounded to twelve entries, decoded with an `inSampleSize` read
+  from the header so the full-size bitmap never exists) and draws it in place.
+  Tapping it, or any link, opens the same preview sheet every other delivered
+  file opens -- one gesture, one destination, whether the file is a figure, the
+  report beside it, or a path that turns out not to exist.
+
+Two smaller things the same change carried. The sheet now says which lines a
+`#L24-L30` reference meant (shown, not scrolled to: an offset computed from an
+assumed line height lands somewhere plausible and wrong), and a link to a folder
+-- `[figures](<out/figures/>)` is how a turn says where its figures went -- is
+answered as a folder rather than as a missing file, because that is a different
+answer to the reader's question.
+
+### What is tested where
+
+`FileReferenceTest` owns the destination rules, including the ones that bit:
+the `L` repeated after the dash in `#L24-L30`, an en dash, a percent escape of a
+Chinese path, a literal `%` in a file name, `notes.md:24` staying inert because
+it is spelled like a scheme, and a base whose spelling chooses the separator.
+`SimpleMarkdownTest` pins the block rule against the delivery shape the real
+session used, and pins that a link with no handler, or an inert destination,
+carries no annotation at all.
+
+The live harness gained `checkReplyReferences`, which writes a reply in that
+shape, parses it with the app's parser, and opens every reference through the
+Host with the app's client -- text first and the byte endpoint second, the same
+two steps the sheet makes. It is the check that was red before this change.

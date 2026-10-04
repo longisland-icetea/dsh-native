@@ -194,6 +194,101 @@ fun main(args: Array<String>): Unit = runBlocking {
         java.nio.file.Files.walk(scratch).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) }
     }
 
+    /**
+     * A reply's own file references, opened the way a reader opens them.
+     *
+     * The harness tells the model to deliver a file by *linking* it -- a figure
+     * as `![alt](<path>)`, a document as `[name](<path>)`, the destination
+     * relative to the working directory or absolute, with a line anchor when the
+     * point is a few lines. So the delivery surface is the reply's text, and the
+     * chain that has to hold is: parse the block, classify the destination,
+     * resolve it, read it through the Host. Each link is one of those steps in a
+     * place where a mistake looks like a reply nobody can open.
+     */
+    suspend fun checkReplyReferences(sessionId: String) {
+        val scratch = java.nio.file.Files.createTempDirectory("dsh-reply")
+        val document = scratch.resolve("audit.md")
+        val figure = scratch.resolve("fig one.png")
+        java.nio.file.Files.write(document, "# Findings\n\n| a | b |\n|---|---|\n| 1 | 2 |\n".toByteArray())
+        java.nio.file.Files.write(figure, FIGURE_PNG)
+        val reply = """
+            图集做好了。
+
+            ![fig1](<$figure>)
+
+            ## 交付物
+
+            - 文档：[audit.md]($document#L1-L2) — 逐图读法
+            - 图：[fig1](<$figure>)
+            - 网页：[example](https://example.com/x)
+            - 片段：[top](#L1)
+        """.trimIndent()
+
+        val blocks = SimpleMarkdown.parse(reply)
+        val figures = blocks.filterIsInstance<MarkdownBlock.Image>()
+        report.check(
+            "a reply's figure is a block, and its bracketed path is unwrapped",
+            figures.single().destination == figure.toString(),
+            figures.singleOrNull()?.destination ?: "no figure block: ${blocks.map { it::class.simpleName }}",
+        )
+
+        // The same walk the transcript does: every reference in the prose, by
+        // what it turns out to name.
+        val opened = mutableListOf<String>()
+        val skipped = mutableListOf<String>()
+        for (block in blocks.filterIsInstance<MarkdownBlock.Prose>()) {
+            for (line in block.lines) {
+                var index = 0
+                while (true) {
+                    val at = line.indexOf('[', index)
+                    if (at < 0) break
+                    val reference = SimpleMarkdown.referenceAt(line, at)
+                    if (reference == null) { index = at + 1; continue }
+                    index = reference.end
+                    when (val target = linkTargetOf(reference.destination)) {
+                        is LinkTarget.File -> {
+                            val path = resolveWorkspacePath(scratch.toString(), target.ref.path)
+                            // The same two-step the sheet makes: text first, and
+                            // the byte endpoint when the Host refuses the bytes as
+                            // not-text -- which is what a linked figure does.
+                            runCatching { direct.readWorkspaceFile(sessionId, path) }
+                                .onSuccess { opened += target.ref.path }
+                                .onFailure { error ->
+                                    if (error.message.orEmpty().contains("not-text") &&
+                                        runCatching { direct.readWorkspaceBytes(sessionId, path) }.isSuccess
+                                    ) {
+                                        opened += target.ref.path
+                                    }
+                                }
+                        }
+                        else -> skipped += "${reference.label}: $target"
+                    }
+                }
+            }
+        }
+        report.check(
+            "every file a reply linked reads back, line anchor and all",
+            opened.toSet() == setOf(document.toString(), figure.toString()),
+            "opened=$opened skipped=$skipped",
+        )
+        report.check(
+            "an external link goes to the browser and a fragment opens nothing",
+            skipped.size == 2 && skipped.any { it.contains("External") } && skipped.any { it.contains("Inert") },
+            skipped.joinToString(),
+        )
+
+        // The figure's bytes, which is what the transcript draws from.
+        val resolvedFigure = resolveWorkspacePath(scratch.toString(), figures.single().destination)
+        val bytes = runCatching { direct.readWorkspaceBytes(sessionId, resolvedFigure) }
+        report.check(
+            "a delivered figure's bytes come back whole",
+            bytes.getOrNull()?.contentEquals(FIGURE_PNG) == true,
+            "${bytes.getOrNull()?.size ?: 0} of ${FIGURE_PNG.size}; ${bytes.exceptionOrNull()?.message.orEmpty()}",
+        )
+
+        java.nio.file.Files.walk(scratch).sorted(Comparator.reverseOrder()).forEach { java.nio.file.Files.deleteIfExists(it) }
+    }
+
     // `SessionGroup.fromWorkspaces` is the drawer's own rule -- origin, archive
     // and blank -- so a check through it is a check on what a reader would see,
     // not merely on what the state holds.
@@ -246,6 +341,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         // Runs before the turn, so a failure here does not cost the model quota
         // the rest of the run spends.
         checkDeliverableReads(session)
+        checkReplyReferences(session)
 
         val snapshot = until("the follow snapshot") {
             holder.state.value.conversation?.takeIf { it.items.isNotEmpty() || it.throughSeq > 0 }
