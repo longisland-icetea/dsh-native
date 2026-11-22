@@ -1211,3 +1211,65 @@ The live harness gained `checkReplyReferences`, which writes a reply in that
 shape, parses it with the app's parser, and opens every reference through the
 Host with the app's client -- text first and the byte endpoint second, the same
 two steps the sheet makes. It is the check that was red before this change.
+
+## Follow two upstream updates: silence the job log, read the result where it moved
+
+The phone showed two `job/registered` / `job/settled` lines under every tool card.
+A census of the 120 most recent session logs on this machine (161,079 records, 41
+event types) said where they came from: the job registry now writes a lifecycle
+pair around **every** tool call, foreground `bash` included, so a call that used
+to leave two records leaves four. Folded through `toItem` the pair fell through
+the fallback branch, which names an event type this build does not know -- the
+mechanism that made the delivery watermark visible a release earlier -- and drew
+21,028 rows over those 120 sessions: 28% of the whole transcript, two bare type
+names under every card. The oldest 60 logs on the machine hold not one of them,
+which is what dates the change to a 2026-10 update.
+
+Hiding them is the whole fix, and the reason is not "they are noisy": the Host's
+own `SessionEventMap` documents both records as **log-only**, the card they land
+under already names the tool and its arguments, and the roster a reader actually
+wants is drawn from `job/list`, its own stream. They are hidden as a namespace
+(`job/*`), like the upload watermark, because the registry's lifecycle is
+bookkeeping whatever it calls its next record -- and unlike an unknown plugin
+event, nothing reaches the reader by this path that does not reach it another way.
+
+The same census turned up a second, worse thing the job noise was hiding. Every
+one of the 23,428 tool cards in those 120 sessions was stuck on "running" with no
+output: 0 of 23,428 resolved. A September 2026 update had also changed the *shape* of
+`tool/result`, without adding an event type to notice it by. It used to be a
+`role: "user"` message holding one `tool-result` block, with the id, the failure
+flag and the text inside that block -- two levels of `content`. It is now a
+`role: "tool"` message: `toolCallId` and `isError` sit on the message and
+`content` is the ordinary block array. `toolResultOf` looked only inside the old
+block, found no id, and returned a result nothing could pair with
+`pairToolResults`, so no card ever left "running".
+
+Both shapes are decoded now, in that order, because they are not alternatives: a
+log written by an older Host still replays from disk, and a session opened from
+history has to read the same as it did the day it was written. A picture a tool
+hands back is a content block beside the text, and it is skipped rather than
+spelled out -- the attachment reference is not something a monospace output line
+can draw.
+
+### What is tested where
+
+`EventVisibilityTest` pins the pair: a job record is no row, the namespace is
+what is hidden rather than the two names observed, and one `tool/call` with its
+job pair and its result folds to **one** card. That last assertion is also the
+one that caught the pairing bug in miniature -- it failed on the new payload until
+`toolResultOf` learned the new shape.
+
+`EventDecodeTest` pins both `tool/result` shapes against payloads copied from the
+logs, one from each side of the change, plus a failed result and a result carrying
+an image block. `docs/event-coverage.md` records the census, the new
+never-observed list, and the trap that makes a naive log census useless: the log
+is a concatenation of zstd frames and a one-shot decoder returns only the first
+frame's worth of it.
+
+The live harness gained the two checks that were missing, since the harness is
+where the state machine meets a real Host and it had never looked at a tool card:
+one waits for a card to reach `done` with its output folded in, and the other, once
+the turn is over, asserts that no card is still claiming to run. The first is the
+decoder bug and the second is the pairing bug; the census is what says how they
+looked before the fix -- 0 of 23,428 cards had resolved.
+

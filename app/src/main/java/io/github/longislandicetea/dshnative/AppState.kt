@@ -2319,6 +2319,17 @@ internal fun toItem(event: SessionEvent, workspaceRoot: String? = null): Transcr
     // one name seen leaking, which is also how `docs/event-coverage.md` records
     // it.
     if (event.type.startsWith("session-log-deepseek/")) return null
+    // A job's lifecycle is the same kind of record: since a 2026-10 Host update
+    // the registry writes a `job/registered`/`job/settled` pair around *every*
+    // tool call (foreground bash included), and the pair carries nothing the
+    // reader cannot already see -- the card above it names the tool and its
+    // arguments, and the roster is drawn from `job/list`. The Host's own
+    // `SessionEventMap` documents both as "Log-only", so this is the log's
+    // bookkeeping rather than a second rendering of the turn: over 120 sampled
+    // sessions it was 21,028 rows, 28% of the whole transcript. Matched as a
+    // namespace for the same reason as the upload watermark -- the registry's
+    // lifecycle is bookkeeping whatever it calls its next record.
+    if (event.type.startsWith("job/")) return null
     // `turn:<turn>:<seq>`: the turn is part of the key because the usage row
     // is placed under the last row of its turn, and the renderer draws a
     // stream of rows with no turn model of its own. A key of `seq-<n>` left

@@ -1148,27 +1148,58 @@ object EventPayload {
     /**
      * `tool/result` payload: the tool's output text and whether it failed.
      *
-     * Measured shape: `data.message.content[]` holds exactly one `tool-result`
-     * block whose own `content[]` carries the text; `toolCallId` correlates it
-     * back to the call and `isError` marks failure. Note the two levels of
-     * `content` — reading only the outer one yields nothing.
+     * Two shapes, and both are decoded, because a session log replays from disk
+     * long after the Host that wrote it -- and this machine holds both: the
+     * newest log written the old way is dated 2026-09-27, the oldest written the
+     * new way 2026-09-08. The old one is a `role: "user"` message holding one
+     * `tool-result` block, whose own `content[]` carries the text, whose
+     * `toolCallId` correlates it to the call and whose `isError` marks failure --
+     * two levels of `content`, and reading only the outer one yields nothing.
+     * The new one is a `role: "tool"` message: `toolCallId` and `isError` sit on
+     * the message, and `content` is the ordinary block array (`text`, plus an
+     * `image` block when the tool handed back a picture, which has no text to
+     * show). A decoder written for the old shape alone matched neither field on
+     * the new one, so it returned an id-less result: nothing paired, and 23,428
+     * of 23,428 tool cards in a 120-session census stayed on "running" with no
+     * output.
      */
     fun toolResultOf(event: SessionEvent): ToolResult? {
-        val outer = ((event.data as? JsonObject)?.get("message") as? JsonObject) ?: (event.data as? JsonObject)
-        val blocks = (outer?.get("content") as? JsonArray) ?: return null
+        val message = ((event.data as? JsonObject)?.get("message") as? JsonObject) ?: (event.data as? JsonObject)
+        val blocks = (message?.get("content") as? JsonArray) ?: return null
+        // The current shape: the correlation id is on the message, not in a block.
+        (message["toolCallId"] as? JsonPrimitive)?.contentOrNull?.let { id ->
+            return ToolResult(
+                toolCallId = id,
+                text = textOfBlocks(blocks),
+                isError = (message["isError"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            )
+        }
+        // The older shape: one `tool-result` block, with the text inside it.
         for (part in blocks) {
             val block = part as? JsonObject ?: continue
             if (block["type"]?.jsonPrimitive?.contentOrNull != "tool-result") continue
-            val text = (block["content"] as? JsonArray)?.mapNotNull { item ->
-                ((item as? JsonObject)?.get("text") as? JsonPrimitive)?.takeIf { it.isString }?.content
-            }.orEmpty().joinToString("\n")
             return ToolResult(
                 toolCallId = block["toolCallId"]?.jsonPrimitive?.contentOrNull,
-                text = text.ifBlank { null },
+                text = textOfBlocks(block["content"] as? JsonArray),
                 isError = block["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
             )
         }
         return null
+    }
+
+    /**
+     * The text of one content-block array, joined; null when it carries none.
+     *
+     * A non-text block is skipped rather than spelled out: an `image` block holds
+     * an attachment reference and nothing a monospace output line could draw.
+     */
+    private fun textOfBlocks(blocks: JsonArray?): String? {
+        val array = blocks ?: return null
+        return array.mapNotNull { part ->
+            val block = part as? JsonObject ?: return@mapNotNull null
+            if ((block["type"] as? JsonPrimitive)?.contentOrNull != "text") return@mapNotNull null
+            (block["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        }.joinToString("\n").ifBlank { null }
     }
 
     /**

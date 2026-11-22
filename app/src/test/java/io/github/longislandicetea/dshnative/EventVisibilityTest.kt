@@ -101,6 +101,82 @@ class EventVisibilityTest {
         assertTrue(usageAwareItems(machinery.map(::event)).isEmpty())
     }
 
+    /**
+     * The pair the Host wraps around *every* tool call since a 2026-10 update.
+     *
+     * The job registry logs a registration and a settlement for foreground calls
+     * too -- a plain `bash` call leaves these two records between its `tool/call`
+     * and its `tool/result` -- so the fallback drew a bare `job/registered` line
+     * under every tool card. Over 120 sampled sessions that was 21,028 rows, 28%
+     * of the transcript, and the pair was the whole of what that update added to
+     * the log's vocabulary. Neither record is conversation: the Host's own
+     * `SessionEventMap` calls both "log-only", the card above them already names
+     * the tool, and the roster is drawn from `job/list`.
+     */
+    private val jobRegistered = event(
+        """{"type":"job/registered","seq":21,"time":1795309048919,
+           "data":{"jobId":"bash-8da0b9b754a24e2b",
+           "owner":"session-eea071e6-3d2a-48bc-8553-db18a3f43652","kind":"bash",
+           "label":"ls -la /home/cxxiao/.local/node-22.23.2/lib/node_modules/@deepseek-ai/dsh/ 2>&1 | head -50; echo \"---\"; pwd",
+           "startedAt":1795309048919,
+           "toolCall":{"callId":"call_00_3m08c4p5yilZhJf7ovnn9644","rootCallId":"call_00_3m08c4p5yilZhJf7ovnn9644"}}}""",
+    )
+
+    private val jobSettled = event(
+        """{"type":"job/settled","seq":22,"time":1795309048928,
+           "data":{"jobId":"bash-8da0b9b754a24e2b",
+           "owner":"session-eea071e6-3d2a-48bc-8553-db18a3f43652","kind":"bash",
+           "label":"ls -la /home/cxxiao/.local/node-22.23.2/lib/node_modules/@deepseek-ai/dsh/ 2>&1 | head -50; echo \"---\"; pwd",
+           "startedAt":1795309048919,
+           "toolCall":{"callId":"call_00_3m08c4p5yilZhJf7ovnn9644","rootCallId":"call_00_3m08c4p5yilZhJf7ovnn9644"},
+           "finishedAt":1795309048928,"status":"completed","cause":"producer",
+           "producerReported":true,"detail":"exit code: 0"}}""",
+    )
+
+    @Test
+    fun `a job's lifecycle is not a row`() {
+        assertNull(toItem(jobRegistered))
+        assertNull(toItem(jobSettled))
+        // The replay path too: an opened session draws through the same mapper.
+        assertTrue(usageAwareItems(listOf(jobRegistered, jobSettled)).isEmpty())
+    }
+
+    @Test
+    fun `a tool call and its job bookkeeping are one card`() {
+        // The four records one foreground bash call leaves in the log, in order.
+        val call = event(
+            """{"type":"tool/call","seq":20,"time":1795309048886,
+               "data":{"turn":1,"step":1,"callId":"call_00_3m08c4p5yilZhJf7ovnn9644","name":"bash",
+               "arguments":"{\"command\": \"ls -la /home/cxxiao/.local/node-22.23.2/lib/node_modules/@deepseek-ai/dsh/ 2>&1 | head -50; echo \\\"---\\\"; pwd\", \"description\": \"List DSH checkout contents\"}"}}""",
+        )
+        val result = event(
+            """{"type":"tool/result","seq":23,"time":1795309048929,
+               "data":{"turn":1,"step":1,
+               "message":{"role":"tool","source":{"kind":"tool","callId":"call_00_3m08c4p5yilZhJf7ovnn9644"},
+               "toolCallId":"call_00_3m08c4p5yilZhJf7ovnn9644",
+               "content":[{"type":"text","text":"total 56\ndrwxr-xr-x   4 cxxiao cxxiao  4096 Oct 30 09:01 .\n"}],
+               "isError":false,"id":"57df3b88-4690-47ec-90d8-8f7de294ad41"},"meta":{"cwd":"/home/cxxiao"}},
+               "sourceEventSeqs":[20],"surfaceOp":"append"}""",
+        )
+        val rows = pairToolResults(usageAwareItems(listOf(call, jobRegistered, jobSettled, result)))
+        assertEquals("one card, not three rows: ${rows.map { it::class.simpleName }}", 1, rows.size)
+        assertTrue("the card, with its result folded in", rows.single() is TranscriptItem.ToolCall)
+    }
+
+    @Test
+    fun `the job hide is the namespace, not the two names observed`() {
+        // Same reasoning as the upload watermark: the whole `job/` namespace is
+        // the registry's own lifecycle, and the roster does not come from here.
+        assertNull(
+            toItem(
+                event(
+                    """{"type":"job/progress","seq":24,"time":0,
+                       "data":{"jobId":"bash-1","progress":"3/10"}}""",
+                ),
+            ),
+        )
+    }
+
     @Test
     fun `a retry is one note, not two rows`() {
         // The pair the Host writes per attempt, from one stalled session: the

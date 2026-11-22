@@ -3,10 +3,11 @@
 Every `SessionEventMap` member this harness can persist, from the generated
 registry at
 `@deepseek-ai/dsh-session/lib/types/known-event-types.js`, cross-checked against a
-live census of forty followed sessions (83,526 records, 39 event types observed;
-the fortieth record type is the log's own `session` header, which is not
-delivered to a follower). Event names outside that set come from out-of-repo
-plugins and are typed by their `source.plugin`.
+live census of 120 recently followed sessions (161,079 records, 41 event types
+observed; the log's own `session` header is not delivered to a follower). The
+0.2.1 build behind that census holds 62 names, so 21 of them have never been seen
+written — they are listed at the end as out of scope. Event names outside the
+registry come from out-of-repo plugins, and their `source` says which.
 
 Column meanings:
 - **render** — what the app does with it today.
@@ -19,7 +20,7 @@ Column meanings:
 | `user/message` | bubble when `source.kind == "user"`, otherwise a notice card (or hidden) | the harness talks about its own work; a job result is machinery, not a person |
 | `assistant/message` | markdown bubble, with the reply's own file references openable (figures drawn in place) | the reply itself — and, since the harness asks for a delivery as a Markdown link or image, the delivery surface too |
 | `tool/call` | tool card with arguments | the one line that makes a tool-heavy turn scannable |
-| `tool/result` | folded into its call | a separate row doubles every tool's height |
+| `tool/result` | folded into its call; both wire shapes decoded | a separate row doubles every tool's height. The shape moved under this client in September 2026 — `role: "tool"` with the id on the message, where it used to be a `role: "user"` message holding a `tool-result` block — and a decoder written for the old one left every card on "running" |
 | `todo/write` | todo card | the plan is the most useful thing to re-read mid-turn |
 | `deliverables/presented` | deliverables card, each row opening a preview | the whole point of a turn is what it produced; `present` is now the *secondary* delivery surface — a reply's own `![…](<path>)` / `[…](<path>)` references are the primary one, and both open the same sheet |
 | `model/selection` | model chip | answers "which model is this" without opening settings |
@@ -46,6 +47,15 @@ messages and settle notices to the human bubble.
 | `agent-instructions` | `instructions` | hidden: injected input, repeats on every change |
 | `skill-catalog` | `catalog` | hidden: capability listing, not conversation |
 
+Since a September 2026 update the plugin's name is the `kind` itself rather than a
+`plugin` field on a `plugin` message: `tool-jobs`, `model-selection`, `runtime-context`,
+`time-context`, `compact-checkpoint`, `goal`, `tool-goal` and
+`repeat-tool-reminder` all arrive that way. No code changed for it — `noticeLabel`
+already fell back to the kind, spaced out — so they draw as notice cards titled
+"tool jobs", "runtime context", "compact checkpoint" and so on. `runtime-context`
+and `time-context` keep `form: snapshot`; the rest carry `notice` or no form at
+all, and the title is the same either way.
+
 ## Hidden on purpose
 
 | type | why |
@@ -64,16 +74,29 @@ messages and settle notices to the human bubble.
 | `workspace/changes` | a `{turn}` marker that a turn touched the workspace; which files changed is in the tool cards and the deliverables card, where the paths are |
 | `subagent/catalog`, `subagent/descriptor`, `subagent/model-selection-policy` | the subagent roster's own bookkeeping; the dock draws that roster from its own stream, with labels, tokens and a jump into the child |
 | `llm/retry-started` | the second half of a retry: `llm/retry` above it already said an attempt failed and another is coming. Two events, one fact, one row |
+| `job/registered`, `job/settled` | the job registry's own lifecycle, and the Host's `SessionEventMap` calls both "log-only". Since a 2026-10 update *every* tool call writes a pair around its card, so the fallback drew a bare type name under every tool card: 21,028 rows over 120 sampled sessions, 28% of what the transcript drew. The card above them names the tool and its arguments, and the roster is drawn from `job/list`. Hidden as a namespace, like the upload watermark — that whole namespace is the same bookkeeping. Pinned by `EventVisibilityTest` |
 | `assistant/attempt` stream | see above |
 
 ## Observed and unclassified
 
 None, as of the census above. Every type the harness was seen to write now has a
 branch of its own: rendered, hidden, or — for `llm/retry`, `goal/change` and
-`agent-preset/selected` — a note. A row census over nine real logs, folding each
-one through `toItem` and tallying rows per type, leaves nothing falling through
-the fallback: the six logs that carried delivery watermarks held 1477 of them
-between them, and now draw no rows at all.
+`agent-preset/selected` — a note.
+
+The 2026-11 census (against a 0.2.1-rc.5 Host) found two upstream changes this
+build had not accounted for, and it took both kinds of census to see them. The
+first was a *new type*: `job/registered` and `job/settled` arrived as 21,028
+unclassified records, one pair around every tool call, and drew 28% of the
+transcript as bare type names until they were hidden — a type census shows that
+immediately. The second changed the *shape* of an existing event without adding a
+type at all, and no type census can see it: `tool/result` became a `role: "tool"`
+message in September 2026, and a decoder written for the `role: "user"` /
+`tool-result` shape returned no correlation id, so nothing paired and 23,428 of
+23,428 tool cards stayed on "running" with no output. A row census does not catch
+that either — the row was still there, it was the pairing that had stopped. What
+found it was folding a captured run through `toItem` and `pairToolResults` and
+noticing the card never left "running", which is the check worth making after the
+next update too.
 
 That is a moment, not a guarantee. The fallback stays loud on purpose: an
 out-of-repo plugin's event is not conversation either, but silently dropping an
@@ -84,8 +107,8 @@ what says whether a reader sees it.
 
 Never observed in the census, so out of scope until one shows up:
 `approval/asked`, `approval/decided`, `feedback/*`, `hook/invoked`,
-`hook/result`, `plan/mode`, `schedule/change`, `team/*`, `tool-workflow/*`,
-`tool/ptc-dispatch*`.
+`hook/result`, `image/offload`, `plan/mode`, `schedule/change`, `team/*`,
+`tool-workflow/*`, `tool/ptc-dispatch*`, `working-directory/change`.
 
 Approvals and questions reach the client as **Remote Event waterfalls** on
 `$events`, not as transcript rows, so their absence here is expected — see the
@@ -94,9 +117,11 @@ pending-interaction path instead.
 ## Tests
 
 `app/src/test/java/.../EventDecodeTest.kt` pins the decoders for this table,
-using payloads copied from a live capture. `EventVisibilityTest` pins the two
-ends of the fallback: a machinery namespace stays silent, and a type this build
-does not recognise still names itself. `SimpleMarkdownTest` does the same for
+using payloads copied from a live capture — including both `tool/result` shapes,
+because a log written by an older Host still replays from disk. `EventVisibilityTest`
+pins the two ends of the fallback: a machinery namespace stays silent, and a type
+this build does not recognise still names itself; it also pins that one tool call
+with its job pair folds to one card. `SimpleMarkdownTest` does the same for
 the rendering of assistant text, and `WorkspaceFilePageTest` +
 `DeliverableViewTest` for the page a deliverable read returns and the document it
 becomes. `./tools/run-jvm-tests.sh` runs all of them locally and Gradle runs them
@@ -117,9 +142,20 @@ Both sources are cheap to regenerate:
   `~/.dsh/sessions/<project>/<session>/` is a zstd stream of the same records, so
   a type census needs no Host at all.
 
+One trap when reading a log directly: the file is a **concatenation of zstd
+frames**, one per append, and a one-shot decoder stops at the end of the first
+frame — Node's `zstdDecompressSync`, for instance, returns the `session` header
+and nothing else on a megabyte file. Decompress every frame (split on the
+`28 b5 2f fd` magic, or stream it), or the census silently counts one record per
+session. The frame boundary can occur inside compressed data by chance, so a
+slice that fails to decode is widened into the next one rather than skipped.
+
 A type census is not a *row* census, and only the second one is what a reader
 sees. After an upstream update the question is not "which types exist" but "which
 of them reach the screen", and the answer is a fold: run a captured log through
 `toItem` and tally rows per type. That is what turned up the delivery watermark
 (39 events, 39 rows, one per step) and, in the same pass, the table of unhandled
-types above.
+types above. A third pass is worth adding after every update: fold the same run
+through `pairToolResults` and check that every tool card ends up `done` or
+`failed`, since an id that stops matching breaks the card without changing the
+row count.

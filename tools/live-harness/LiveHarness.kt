@@ -413,6 +413,51 @@ fun main(args: Array<String>): Unit = runBlocking {
         report.check("and rows with no seq yet come last", seqs.drop(loggedSeqs.size).all { it == null })
         report.check("and the queue is empty again", holder.state.value.queues[session].isNullOrEmpty())
 
+        // ── a tool call resolves, and nothing is left claiming to run ────────
+        // A September 2026 update moved the `tool/result` message from a
+        // `role: "user"` envelope holding one `tool-result` block to a `role: "tool"`
+        // message with the id on it. For weeks nothing paired: every card on the
+        // phone stayed on "running" with no output, 0 of 23,428 in a census of real
+        // logs. Both halves are checked here because a card that resolves and one
+        // that is left behind are different failures -- the first is a decoder that
+        // lost the id, the second is a row that never got its pair.
+        val resolvedCard = withTimeoutOrNull(180_000) {
+            while (true) {
+                val card = holder.state.value.conversation?.items
+                    ?.filterIsInstance<TranscriptItem.ToolCall>()
+                    ?.firstOrNull {
+                        it.status == TranscriptItem.ToolCall.Status.DONE && !it.result.isNullOrBlank()
+                    }
+                if (card != null) return@withTimeoutOrNull card
+                delay(500)
+            }
+            @Suppress("UNREACHABLE_CODE") null
+        }
+        report.check(
+            "a tool call resolves to done, with the output folded in",
+            resolvedCard != null,
+            resolvedCard?.let { "${it.name} ${it.result?.take(40)?.replace('\n', ' ')}" }
+                ?: "no card resolved in 180s",
+        )
+        // A tolerant wait, because "the turn is still going" is a fact about the
+        // model's pacing and must not abort the rest of the run.
+        val turnOver = withTimeoutOrNull(120_000) {
+            while (true) {
+                holder.state.value.conversation?.takeIf { !it.running }?.let { return@withTimeoutOrNull it }
+                delay(250)
+            }
+            @Suppress("UNREACHABLE_CODE") null
+        }
+        val stillRunning = turnOver?.items
+            ?.filterIsInstance<TranscriptItem.ToolCall>()
+            ?.filter { it.status == TranscriptItem.ToolCall.Status.RUNNING }
+            .orEmpty()
+        report.check(
+            "and no finished turn leaves a card claiming to run",
+            turnOver != null && stillRunning.isEmpty(),
+            if (turnOver == null) "the turn did not end in 120s" else stillRunning.joinToString { it.name },
+        )
+
         // ── a steer another client removes is given up on, not waited on ─────
         val third = "HARNESS-THREE run bash: sleep 20 — then reply THREE-DONE"
         holder.send(third)

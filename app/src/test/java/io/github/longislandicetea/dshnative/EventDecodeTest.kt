@@ -242,6 +242,76 @@ class EventDecodeTest {
     }
 
     @Test
+    fun `a tool result is decoded in both shapes the Host has written`() {
+        // Since the September 2026 update: `role: "tool"`, the correlation id and
+        // the failure flag on the message, and `content` the ordinary block array.
+        val now = EventPayload.toolResultOf(
+            event(
+                """{"type":"tool/result","seq":23,"time":1795309048929,
+                   "data":{"turn":1,"step":1,
+                   "message":{"role":"tool","source":{"kind":"tool","callId":"call_00_3m08c4p5yilZhJf7ovnn9644"},
+                   "toolCallId":"call_00_3m08c4p5yilZhJf7ovnn9644",
+                   "content":[{"type":"text","text":"total 56\ndrwxr-xr-x   4 cxxiao cxxiao  4096 Oct 30 09:01 ."}],
+                   "isError":false,"id":"57df3b88-4690-47ec-90d8-8f7de294ad41"},
+                   "meta":{"cwd":"/home/cxxiao"}},"sourceEventSeqs":[20],"surfaceOp":"append"}""",
+            ),
+        )
+        assertEquals("call_00_3m08c4p5yilZhJf7ovnn9644", now?.toolCallId)
+        assertEquals("total 56\ndrwxr-xr-x   4 cxxiao cxxiao  4096 Oct 30 09:01 .", now?.text)
+        assertEquals(false, now?.isError)
+        // The older shape, which a session written by an earlier Host still
+        // replays from disk: `role: "user"` with one `tool-result` block whose own
+        // `content` carries the text.
+        val before = EventPayload.toolResultOf(
+            event(
+                """{"type":"tool/result","seq":21,"time":1788949981713,
+                   "data":{"turn":1,"step":1,
+                   "message":{"source":{"kind":"tool","callId":"call_00_ET_NTVg3WkINsq1Lr2kDeTh6929"},
+                   "content":[{"type":"tool-result","toolCallId":"call_00_ET_NTVg3WkINsq1Lr2kDeTh6929",
+                   "content":[{"type":"text","text":"/home/cxxiao\ntotal 672"}],"isError":false}]}}}""",
+            ),
+        )
+        assertEquals("call_00_ET_NTVg3WkINsq1Lr2kDeTh6929", before?.toolCallId)
+        assertEquals("/home/cxxiao\ntotal 672", before?.text)
+        assertEquals(false, before?.isError)
+    }
+
+    @Test
+    fun `a failed tool result is marked failed`() {
+        val failed = EventPayload.toolResultOf(
+            event(
+                """{"type":"tool/result","seq":416,"time":1795309204285,
+                   "data":{"turn":1,"step":44,
+                   "message":{"role":"tool","source":{"kind":"tool","callId":"call_00_V99UYnLFGqck5djZYFYY9917"},
+                   "toolCallId":"call_00_V99UYnLFGqck5djZYFYY9917",
+                   "content":[{"type":"text","text":"Error: file has not been read"}],
+                   "isError":true,"id":"6854f544-543a-4301-9098-a66d55d60518"},
+                   "error":{"name":"FsError","code":"FS_NOT_OBSERVED"}},"sourceEventSeqs":[415],"surfaceOp":"append"}""",
+            ),
+        )
+        assertEquals(true, failed?.isError)
+        assertEquals("Error: file has not been read", failed?.text)
+    }
+
+    @Test
+    fun `a picture a tool hands back is not output text`() {
+        // A tool result may carry an `image` block beside the text; the block holds
+        // an attachment reference, not something a monospace output line can draw.
+        val withPicture = EventPayload.toolResultOf(
+            event(
+                """{"type":"tool/result","seq":1672,"time":1791099798862,
+                   "data":{"turn":10,"step":12,
+                   "message":{"role":"tool","source":{"kind":"tool","callId":"call_00_ET_FAQbPYjWTeEMBXdlm9Yn8122"},
+                   "toolCallId":"call_00_ET_FAQbPYjWTeEMBXdlm9Yn8122",
+                   "content":[{"type":"text","text":"<path>/out/fig1.png</path>"},
+                   {"type":"image","attachment":{"attachmentId":"sha256:be67","mediaType":"image/webp"}}],
+                   "isError":false,"id":"af11f0ec"}},"sourceEventSeqs":[1671],"surfaceOp":"append"}""",
+            ),
+        )
+        assertEquals("<path>/out/fig1.png</path>", withPicture?.text)
+    }
+
+    @Test
     fun `a message with no text block produces no reply`() {
         val reasoningOnly = event(
             """{"type":"assistant/message","seq":9,"time":0,
